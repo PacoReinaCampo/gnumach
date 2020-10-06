@@ -1,0 +1,3 @@
+[submodule "gnumig"]
+	path = gnumig
+	url = git://git.savannah.gnu.org/hurd/mig.git
