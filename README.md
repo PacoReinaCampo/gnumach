@@ -1,3 +1,3 @@
-# gnumig
+# gnumach
 
-Mach Interface Generator
+Kernel
