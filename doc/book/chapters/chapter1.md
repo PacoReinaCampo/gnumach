@@ -211,11 +211,11 @@ elf2hex.sh:
 riscv32-unknown-elf-objcopy -O ihex rv32mi-p-breakpoint rv32mi-p-breakpoint.hex
 riscv32-unknown-elf-objcopy -O ihex rv32mi-p-csr rv32mi-p-csr.hex
 ...
-riscv32-unknown-elf-objcopy -O ihex rv32um-v-remw rv32um-v-remw.hex
-```
+riscv32-unknown-elf-objcopy -O ihex rv32um-v-remw rv32um-v-remw.hex```
+
+.. ....... ........ ........ ....... .. ........... ...... .... .. ...... ..... .. ..... .... ........ ... ...... . ... .... .. ......... ........... .... .... ........ .. .... . ..... ....... .... ... ........ .... ............ .. ... ... ....... .. ...... .... ... .... ....... .. ..... ... .... ....... ... ....... ......... ..... .......... ....... ..... ....... ... ....... ... ....... ..... ..... .... . ........ .. ... ..... ......... .. ........ ..... ....... .......... .......... ... ........ .. ... ..... .. ........ ..... .......... .... ... ...... .. .....
 
 type:
-```
 export PATH=/opt/riscv-elf-gcc/bin:${PATH}
 
 spike rv32mi-p-breakpoint
@@ -235,11 +235,11 @@ elf2hex.sh:
 riscv64-unknown-elf-objcopy -O ihex rv64mi-p-breakpoint rv64mi-p-breakpoint.hex
 riscv64-unknown-elf-objcopy -O ihex rv64mi-p-csr rv64mi-p-csr.hex
 ...
-riscv64-unknown-elf-objcopy -O ihex rv64um-v-remw rv64um-v-remw.hex
-```
+riscv64-unknown-elf-objcopy -O ihex rv64um-v-remw rv64um-v-remw.hex```
+
+.. ....... ........ ........ ....... .. ........... ...... .... .. ...... ..... .. ..... .... ........ ... ...... . ... .... .. ......... ........... .... .... ........ .. .... . ..... ....... .... ... ........ .... ............ .. ... ... ....... .. ...... .... ... .... ....... .. ..... ... .... ....... ... ....... ......... ..... .......... ....... ..... ....... ... ....... ... ....... ..... ..... .... . ........ .. ... ..... ......... .. ........ ..... ....... .......... .......... ... ........ .. ... ..... .. ........ ..... .......... .... ... ...... .. .....
 
 type:
-```
 export PATH=/opt/riscv-elf-gcc/bin:${PATH}
 
 spike rv64mi-p-breakpoint
@@ -259,11 +259,11 @@ elf2hex.sh:
 riscv128-unknown-elf-objcopy -O ihex rv128mi-p-breakpoint rv128mi-p-breakpoint.hex
 riscv128-unknown-elf-objcopy -O ihex rv128mi-p-csr rv128mi-p-csr.hex
 ...
-riscv128-unknown-elf-objcopy -O ihex rv128um-v-remw rv128um-v-remw.hex
-```
+riscv128-unknown-elf-objcopy -O ihex rv128um-v-remw rv128um-v-remw.hex```
+
+.. ....... ........ ........ ....... .. ........... ...... .... .. ...... ..... .. ..... .... ........ ... ...... . ... .... .. ......... ........... .... .... ........ .. .... . ..... ....... .... ... ........ .... ............ .. ... ... ....... .. ...... .... ... .... ....... .. ..... ... .... ....... ... ....... ......... ..... .......... ....... ..... ....... ... ....... ... ....... ..... ..... .... . ........ .. ... ..... ......... .. ........ ..... ....... .......... .......... ... ........ .. ... ..... .. ........ ..... .......... .... ... ...... .. .....
 
 type:
-```
 export PATH=/opt/riscv-elf-gcc/bin:${PATH}
 
 spike rv128mi-p-breakpoint
@@ -602,11 +602,11 @@ sudo apt upgrade
 type:
 ```
 sudo apt install git libgmp-dev libmpfr-dev libmpc-dev zlib1g-dev texinfo \
-build-essential flex bison
-```
+build-essential flex bison```
+
+.. ....... ........ ........ ....... .. ........... ...... .... .. ...... ..... .. ..... .... ........ ... ...... . ... .... .. ......... ........... .... .... ........ .. .... . ..... ....... .... ... ........ .... ............ .. ... ... ....... .. ...... .... ... .... ....... .. ..... ... .... ....... ... ....... ......... ..... .......... ....... ..... ....... ... ....... ... ....... ..... ..... .... . ........ .. ... ..... ......... .. ........ ..... ....... .......... .......... ... ........ .. ... ..... .. ........ ..... .......... .... ... ...... .. .....
 
 type:
-```
 git clone git://sourceware.org/git/binutils-gdb.git binutils
 git clone https://github.com/openrisc/or1k-gcc.git gcc
 git clone git://sourceware.org/git/newlib-cygwin.git newlib
@@ -679,11 +679,11 @@ type:
 ```
 sudo apt install autoconf automake autotools-dev curl python3 libmpc-dev \
 libmpfr-dev libgmp-dev gawk build-essential bison flex texinfo gperf \
-libtool patchutils bc zlib1g-dev libexpat-dev
-```
+libtool patchutils bc zlib1g-dev libexpat-dev```
+
+.. ....... ........ ........ ....... .. ........... ...... .... .. ...... ..... .. ..... .... ........ ... ...... . ... .... .. ......... ........... .... .... ........ .. .... . ..... ....... .... ... ........ .... ............ .. ... ... ....... .. ...... .... ... .... ....... .. ..... ... .... ....... ... ....... ......... ..... .......... ....... ..... ....... ... ....... ... ....... ..... ..... .... . ........ .. ... ..... ......... .. ........ ..... ....... .......... .......... ... ........ .. ... ..... .. ........ ..... .......... .... ... ...... .. .....
 
 type:
-```
 git clone --recursive https://github.com/riscv/riscv-gnu-toolchain
 
 cd riscv-gnu-toolchain
