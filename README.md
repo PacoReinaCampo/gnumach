@@ -1,6 +1,6 @@
 # gnumach
 ## QueenField
 
-![QueenField](../master/mach.svg)
+![QueenField](../main/mach.svg)
 
 **Kernel for RTOS**
