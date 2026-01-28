@@ -42,7 +42,7 @@
 #include <string.h>
 
 #include <device/net_status.h>
-#include <machine/machspl.h>		/* spl definitions */
+#include <machine/spl.h>		/* spl definitions */
 #include <device/net_io.h>
 #include <device/if_hdr.h>
 #include <device/io_req.h>
@@ -64,7 +64,7 @@
 #include <kern/slab.h>
 #include <kern/thread.h>
 
-#include <machine/machspl.h>
+#include <machine/spl.h>
 
 #if	MACH_TTD
 #include <ttd/ttd_stub.h>
@@ -86,7 +86,7 @@ int kttd_async_counter= 0;
  * Messages can be high priority or low priority.
  * The network thread processes high priority messages first.
  */
-decl_simple_lock_data(,net_queue_lock)
+def_simple_lock_data(static,net_queue_lock)
 boolean_t	net_thread_awake = FALSE;
 struct ipc_kmsg_queue	net_queue_high;
 int		net_queue_high_size = 0;
@@ -99,7 +99,7 @@ int		net_queue_low_max = 0;		/* for debugging */
  * List of net kmsgs that can be touched at interrupt level.
  * If it is empty, we will also steal low priority messages.
  */
-decl_simple_lock_data(,net_queue_free_lock)
+def_simple_lock_data(static,net_queue_free_lock)
 struct ipc_kmsg_queue	net_queue_free;
 int		net_queue_free_size = 0;	/* on free list */
 int		net_queue_free_max = 0;		/* for debugging */
@@ -125,7 +125,7 @@ int		net_kmsg_send_low_misses = 0;	/* for debugging */
 int		net_thread_awaken = 0;		/* for debugging */
 int		net_ast_taken = 0;		/* for debugging */
 
-decl_simple_lock_data(,net_kmsg_total_lock)
+def_simple_lock_data(static,net_kmsg_total_lock)
 int		net_kmsg_total = 0;		/* total allocated */
 int		net_kmsg_max;			/* initialized below */
 
@@ -235,7 +235,7 @@ net_kmsg_collect(void)
 	(void) splx(s);
 }
 
-void
+static void
 net_kmsg_more(void)
 {
 	ipc_kmsg_t kmsg;
@@ -337,7 +337,7 @@ struct net_hash_header {
         net_hash_entry_t table[NET_HASH_SIZE];
 } filter_hash_header[N_NET_HASH];
 
-decl_simple_lock_data(,net_hash_header_lock)
+def_simple_lock_data(static,net_hash_header_lock)
 
 #define HASH_ITERATE(head, elt) (elt) = (net_hash_entry_t) (head); do {
 #define HASH_ITERATE_END(head, elt) \
@@ -352,10 +352,11 @@ decl_simple_lock_data(,net_hash_header_lock)
 #define FILTER_ITERATE_END }
 
 /* entry_p must be net_rcv_port_t or net_hash_entry_t */
-#define ENQUEUE_DEAD(dead, entry_p, chain) {			\
+#define ENQUEUE_DEAD(dead, entry_p, chain)			\
+MACRO_BEGIN							\
 	(entry_p)->chain.next = (queue_entry_t) (dead);		\
 	(dead) = (queue_entry_t)(entry_p);			\
-}
+MACRO_END
 
 /*
  *	ethernet_priority:
@@ -368,8 +369,7 @@ decl_simple_lock_data(,net_hash_header_lock)
  *	Returns TRUE for high-priority packets.
  */
 
-boolean_t ethernet_priority(kmsg)
-	const ipc_kmsg_t kmsg;
+boolean_t ethernet_priority(const ipc_kmsg_t kmsg)
 {
 	unsigned char *addr =
 		(unsigned char *) net_kmsg(kmsg)->header;
@@ -387,22 +387,23 @@ boolean_t ethernet_priority(kmsg)
 }
 
 mach_msg_type_t header_type = {
-	MACH_MSG_TYPE_BYTE,
-	8,
-	NET_HDW_HDR_MAX,
-	TRUE,
-	FALSE,
-	FALSE,
-	0
+	.msgt_name = MACH_MSG_TYPE_BYTE,
+	.msgt_size = 8,
+	.msgt_number = NET_HDW_HDR_MAX,
+	.msgt_inline = TRUE,
+	.msgt_longform = FALSE,
+	.msgt_deallocate = FALSE,
+	.msgt_unused = 0
 };
 
 mach_msg_type_t packet_type = {
-	MACH_MSG_TYPE_BYTE,	/* name */
-	8,			/* size */
-	0,			/* number */
-	TRUE,			/* inline */
-	FALSE,			/* longform */
-	FALSE			/* deallocate */
+	.msgt_name = MACH_MSG_TYPE_BYTE,
+	.msgt_size = 8,
+	.msgt_number = 0,
+	.msgt_inline = TRUE,
+	.msgt_longform = FALSE,
+	.msgt_deallocate = FALSE,
+	.msgt_unused = 0
 };
 
 /*
@@ -412,7 +413,7 @@ mach_msg_type_t packet_type = {
  *	Dequeues a message and delivers it at spl0.
  *	Returns FALSE if no messages.
  */
-boolean_t net_deliver(boolean_t nonblocking)
+static boolean_t net_deliver(boolean_t nonblocking)
 {
 	ipc_kmsg_t kmsg;
 	boolean_t high_priority;
@@ -466,9 +467,10 @@ boolean_t net_deliver(boolean_t nonblocking)
 		    MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND, 0);
 	    /* remember message sizes must be rounded up */
 	    kmsg->ikm_header.msgh_size =
-		    (((mach_msg_size_t) (sizeof(struct net_rcv_msg)
+		    (mach_msg_size_t) P2ROUND(sizeof(struct net_rcv_msg)
 					- sizeof net_kmsg(kmsg)->sent
-					- NET_RCV_MAX + count)) + 3) &~ 3;
+					- NET_RCV_MAX + count,
+					__alignof__ (uintptr_t));
 	    kmsg->ikm_header.msgh_local_port = MACH_PORT_NULL;
 	    kmsg->ikm_header.msgh_kind = MACH_MSGH_KIND_NORMAL;
 	    kmsg->ikm_header.msgh_id = NET_RCV_MSG_ID;
@@ -549,7 +551,7 @@ void net_ast(void)
 	(void) splx(s);
 }
 
-void __attribute__ ((noreturn)) net_thread_continue(void)
+static void __attribute__ ((noreturn)) net_thread_continue(void)
 {
 	for (;;) {
 		spl_t s;
@@ -602,7 +604,7 @@ void net_thread(void)
 	/*NOTREACHED*/
 }
 
-void
+static void
 reorder_queue(
 	queue_t		first, 
 	queue_t		last)
@@ -690,9 +692,8 @@ int net_filter_queue_reorder = 0; /* non-zero to enable reordering */
  * We are *not* called at interrupt level.
  */
 void
-net_filter(kmsg, send_list)
-	const ipc_kmsg_t	kmsg;
-	ipc_kmsg_queue_t	send_list;
+net_filter(const ipc_kmsg_t	kmsg,
+	ipc_kmsg_queue_t	send_list)
 {
 	struct ifnet		*ifp;
 	net_rcv_port_t		infp, nextfp;
@@ -871,11 +872,10 @@ net_filter(kmsg, send_list)
 }
 
 boolean_t
-net_do_filter(infp, data, data_count, header)
-	net_rcv_port_t	infp;
-	const char *	data;
-	unsigned int	data_count;
-	const char *	header;
+net_do_filter(net_rcv_port_t	infp,
+	const char *	data,
+	unsigned int	data_count,
+	const char *	header)
 {
 	int		stack[NET_FILTER_STACK_DEPTH+1];
 	int		*sp;
@@ -1010,7 +1010,7 @@ net_do_filter(infp, data, data_count, header)
 /*
  * Check filter for invalid operations or stack over/under-flow.
  */
-boolean_t
+static boolean_t
 parse_net_filter(
 	filter_t		*filter,
 	unsigned int		count)
@@ -1437,7 +1437,7 @@ printf ("net_getstat: count: %d, addr_int_count: %d\n",
 io_return_t
 net_write(
 	struct 		ifnet *ifp,
-	int		(*start)(),
+	net_write_start_device_fn	start,
 	io_req_t	ior)
 {
 	spl_t	s;
@@ -1571,17 +1571,17 @@ net_io_init(void)
 
 #ifndef BPF_ALIGN
 #define EXTRACT_SHORT(p)	((u_short)ntohs(*(u_short *)p))
-#define EXTRACT_LONG(p)		(ntohl(*(u_long *)p))
+#define EXTRACT_LONG(p)		(ntohl(*(u_int *)p))
 #else
 #define EXTRACT_SHORT(p)\
 	((u_short)\
 		((u_short)*((u_char *)p+0)<<8|\
 		 (u_short)*((u_char *)p+1)<<0))
 #define EXTRACT_LONG(p)\
-		((u_long)*((u_char *)p+0)<<24|\
-		 (u_long)*((u_char *)p+1)<<16|\
-		 (u_long)*((u_char *)p+2)<<8|\
-		 (u_long)*((u_char *)p+3)<<0)
+		((u_int)*((u_char *)p+0)<<24|\
+		 (u_int)*((u_char *)p+1)<<16|\
+		 (u_int)*((u_char *)p+2)<<8|\
+		 (u_int)*((u_char *)p+3)<<0)
 #endif
 
 /*
@@ -1983,9 +1983,8 @@ bpf_eq(
 }
 
 unsigned int
-bpf_hash (n, keys)
-	int n;
-	const unsigned int *keys;
+bpf_hash (int n,
+	const unsigned int *keys)
 {
 	unsigned int hval = 0;
 	
@@ -1997,11 +1996,11 @@ bpf_hash (n, keys)
 
 
 int
-bpf_match (hash, n_keys, keys, hash_headpp, entpp)
-	net_hash_header_t hash;
-	int n_keys;
-	const unsigned int *keys;
-	net_hash_entry_t **hash_headpp, *entpp;
+bpf_match (net_hash_header_t hash,
+	int n_keys,
+	const unsigned int *keys,
+	net_hash_entry_t 	**hash_headpp,
+	net_hash_entry_t 	*entpp)
 {
 	net_hash_entry_t head, entp;
 	int i;
@@ -2100,7 +2099,7 @@ net_add_q_info(ipc_port_t rcv_port)
 	return (int)qlimit;
 }
 
-void
+static void
 net_del_q_info(int qlimit)
 {
 	simple_lock(&net_kmsg_total_lock);

@@ -132,17 +132,46 @@ typedef	unsigned int mach_msg_size_t;
 typedef natural_t mach_msg_seqno_t;
 typedef integer_t mach_msg_id_t;
 
-typedef	struct {
+/* full header structure, may have different size in user/kernel spaces */
+typedef	struct mach_msg_header {
     mach_msg_bits_t	msgh_bits;
     mach_msg_size_t	msgh_size;
-    mach_port_t		msgh_remote_port;
+    union {
+        mach_port_t		msgh_remote_port;
+        /*
+         * Ensure msgh_remote_port is wide enough to hold a kernel pointer
+         * to avoid message resizing for the 64 bits case. This field should
+         * not be used since it is here just for padding purposes.
+         */
+        rpc_uintptr_t   msgh_remote_port_do_not_use;
+    };
     union {
         mach_port_t	msgh_local_port;
-        unsigned long	msgh_protected_payload;
+        rpc_uintptr_t	msgh_protected_payload;
     };
     mach_port_seqno_t	msgh_seqno;
     mach_msg_id_t	msgh_id;
 } mach_msg_header_t;
+
+#ifdef KERNEL
+/* user-side header format, needed in the kernel */
+typedef	struct {
+    mach_msg_bits_t	msgh_bits;
+    mach_msg_size_t	msgh_size;
+    union {
+        mach_port_name_t	msgh_remote_port;
+        rpc_uintptr_t       msgh_remote_port_do_not_use;
+    };
+    union {
+        mach_port_name_t	msgh_local_port;
+        rpc_uintptr_t msgh_protected_payload;
+    };
+    mach_port_seqno_t	msgh_seqno;
+    mach_msg_id_t	msgh_id;
+} mach_msg_user_header_t;
+#else
+typedef mach_msg_header_t mach_msg_user_header_t;
+#endif
 
 /*
  *  There is no fixed upper bound to the size of Mach messages.
@@ -192,7 +221,49 @@ typedef unsigned int mach_msg_type_name_t;
 typedef unsigned int mach_msg_type_size_t;
 typedef natural_t  mach_msg_type_number_t;
 
+/**
+ * Structure used for inlined port rights in messages.
+ *
+ * We use this to avoid having to perform message resizing in the kernel
+ * since userspace port rights might be smaller than kernel ports in 64 bit
+ * architectures.
+ */
+typedef struct {
+    union {
+        mach_port_name_t name;
+#ifdef KERNEL
+        mach_port_t kernel_port;
+#else
+        uintptr_t kernel_port_do_not_use;
+#endif  /* KERNEL */
+    };
+} mach_port_name_inlined_t;
+
 typedef struct  {
+#ifdef __LP64__
+    /*
+     * For 64 bits, this struct is 8 bytes long so we
+     * can pack the same amount of information as mach_msg_type_long_t.
+     * Note that for 64 bit userland, msgt_size only needs to be 8 bits long
+     * but for kernel compatibility with 32 bit userland we allow it to be
+     * 16 bits long.
+     *
+     * Effectively, we don't need mach_msg_type_long_t but we are keeping it
+     * for a while to make the code similar between 32 and 64 bits.
+     *
+     * We also keep the msgt_longform bit around simply because it makes it
+     * very easy to convert messages from a 32 bit userland into a 64 bit
+     * kernel. Otherwise, we would have to replicate some of the MiG logic
+     * internally in the kernel.
+     */
+    unsigned int	msgt_name : 8,
+			msgt_size : 16,
+			msgt_unused : 5,
+			msgt_inline : 1,
+			msgt_longform : 1,
+			msgt_deallocate : 1;
+    mach_msg_type_number_t   msgt_number;
+#else
     unsigned int	msgt_name : 8,
 			msgt_size : 8,
 			msgt_number : 12,
@@ -200,15 +271,44 @@ typedef struct  {
 			msgt_longform : 1,
 			msgt_deallocate : 1,
 			msgt_unused : 1;
-} mach_msg_type_t;
+#endif
+} __attribute__ ((aligned (__alignof__ (uintptr_t)))) mach_msg_type_t;
 
-typedef	struct	{
+typedef struct {
+#ifdef __LP64__
+    union {
+        /* On 64-bit this is equivalent to mach_msg_type_t so use
+         * union to overlay with the old field names.  */
+        mach_msg_type_t	msgtl_header;
+        struct {
+            unsigned int	msgtl_name : 8,
+                    msgtl_size : 16,
+                    msgtl_unused : 5,
+                    msgtl_inline : 1,
+                    msgtl_longform : 1,
+                    msgtl_deallocate : 1;
+            mach_msg_type_number_t   msgtl_number;
+        };
+    };
+#else
     mach_msg_type_t	msgtl_header;
     unsigned short	msgtl_name;
     unsigned short	msgtl_size;
     natural_t		msgtl_number;
-} mach_msg_type_long_t;
+#endif
+} __attribute__ ((aligned (__alignof__ (uintptr_t)))) mach_msg_type_long_t;
 
+#ifdef __LP64__
+#ifdef __cplusplus
+#if __cplusplus >= 201103L
+static_assert (sizeof (mach_msg_type_t) == sizeof (mach_msg_type_long_t),
+                "mach_msg_type_t and mach_msg_type_long_t need to have the same size.");
+#endif
+#else
+_Static_assert (sizeof (mach_msg_type_t) == sizeof (mach_msg_type_long_t),
+                "mach_msg_type_t and mach_msg_type_long_t need to have the same size.");
+#endif
+#endif
 
 /*
  *	Known values for the msgt_name field.
@@ -301,6 +401,34 @@ typedef integer_t mach_msg_option_t;
 
 #define MACH_SEND_ALWAYS	0x00010000	/* internal use only */
 
+#ifdef __LP64__
+#if defined(KERNEL) && defined(USER32)
+#define MACH_MSG_USER_ALIGNMENT 4
+#else
+#define MACH_MSG_USER_ALIGNMENT 8
+#endif
+#else
+#define MACH_MSG_USER_ALIGNMENT 4
+#endif
+
+#ifdef KERNEL
+/* This is the alignment of msg descriptors and the actual data
+ * for both in kernel messages and user land messages.
+ *
+ * We have two types of alignment because for specific configurations
+ * (in particular a 64 bit kernel with 32 bit userland) we transform
+ * 4-byte aligned user messages into 8-byte aligned messages (and vice-versa)
+ * so that kernel messages are correctly aligned.
+ */
+#define MACH_MSG_KERNEL_ALIGNMENT sizeof(uintptr_t)
+
+#define mach_msg_align(x, alignment)	\
+	( ( ((vm_offset_t)(x)) + ((alignment)-1) ) & ~((alignment)-1) )
+#define mach_msg_user_align(x) mach_msg_align(x, MACH_MSG_USER_ALIGNMENT)
+#define mach_msg_kernel_align(x) mach_msg_align(x, MACH_MSG_KERNEL_ALIGNMENT)
+#define mach_msg_user_is_misaligned(x) ((x) & ((MACH_MSG_USER_ALIGNMENT)-1))
+#define mach_msg_kernel_is_misaligned(x) ((x) & ((MACH_MSG_KERNEL_ALIGNMENT)-1))
+#endif /* KERNEL */
 
 /*
  *  Much code assumes that mach_msg_return_t == kern_return_t.
@@ -386,16 +514,15 @@ typedef kern_return_t mach_msg_return_t;
 #define	MACH_RCV_BODY_ERROR		0x1000400c
 		/* Error receiving message body.  See special bits. */
 
-
 extern mach_msg_return_t
 mach_msg_trap
-   (mach_msg_header_t *msg,
+   (mach_msg_user_header_t *msg,
     mach_msg_option_t option,
     mach_msg_size_t send_size,
     mach_msg_size_t rcv_size,
-    mach_port_t rcv_name,
+    mach_port_name_t rcv_name,
     mach_msg_timeout_t timeout,
-    mach_port_t notify);
+    mach_port_name_t notify);
 
 extern mach_msg_return_t
 mach_msg
@@ -403,9 +530,9 @@ mach_msg
     mach_msg_option_t option,
     mach_msg_size_t send_size,
     mach_msg_size_t rcv_size,
-    mach_port_t rcv_name,
+    mach_port_name_t rcv_name,
     mach_msg_timeout_t timeout,
-    mach_port_t notify);
+    mach_port_name_t notify);
 
 extern __typeof (mach_msg) __mach_msg;
 extern __typeof (mach_msg_trap) __mach_msg_trap;

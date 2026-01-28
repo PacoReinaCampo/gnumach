@@ -61,6 +61,7 @@
 #include <kern/debug.h>		/* For panic() */
 #include <kern/thread.h>		/* For current_thread() */
 #include <kern/host.h>
+#include <kern/mach.server.h>		/* For rpc prototypes */
 #include <vm/vm_kern.h>		/* For kernel_map, vm_move */
 #include <vm/vm_map.h>		/* For vm_map_pageable */
 #include <ipc/ipc_port.h>
@@ -73,7 +74,7 @@ typedef	int		memory_object_lock_result_t; /* moved from below */
 
 
 ipc_port_t	memory_manager_default = IP_NULL;
-decl_simple_lock_data(,memory_manager_default_lock)
+def_simple_lock_data(static,memory_manager_default_lock)
 
 /*
  *	Important note:
@@ -85,7 +86,7 @@ decl_simple_lock_data(,memory_manager_default_lock)
 kern_return_t memory_object_data_supply(
        vm_object_t		object,
 	vm_offset_t		offset,
-	vm_map_copy_t		data_copy,
+	vm_offset_t		vm_data_copy,
 	unsigned int		data_cnt,
 	vm_prot_t		lock_value,
 	boolean_t		precious,
@@ -100,6 +101,7 @@ kern_return_t memory_object_data_supply(
 	vm_offset_t	original_offset;
 	vm_page_t	*page_list;
 	boolean_t	was_absent;
+	vm_map_copy_t data_copy = (vm_map_copy_t)vm_data_copy;
 	vm_map_copy_t	orig_copy = data_copy;
 
 	/*
@@ -425,7 +427,7 @@ kern_return_t memory_object_data_unavailable(
 #define	MEMORY_OBJECT_LOCK_RESULT_MUST_CLEAN	2
 #define	MEMORY_OBJECT_LOCK_RESULT_MUST_RETURN	3
 
-memory_object_lock_result_t memory_object_lock_page(
+static memory_object_lock_result_t memory_object_lock_page(
 	vm_page_t		m,
 	memory_object_return_t	should_return,
 	boolean_t		should_flush,
@@ -976,9 +978,9 @@ kern_return_t	memory_object_get_attributes(
 /*
  *	If successful, consumes the supplied naked send right.
  */
-kern_return_t	vm_set_default_memory_manager(host, default_manager)
-	const host_t	host;
-	ipc_port_t	*default_manager;
+kern_return_t	vm_set_default_memory_manager(
+		const host_t host,
+		ipc_port_t *default_manager)
 {
 	ipc_port_t current_manager;
 	ipc_port_t new_manager;
@@ -1058,8 +1060,7 @@ ipc_port_t	memory_manager_default_reference(void)
  *		know when it should keep memory wired.
  */
 
-boolean_t	memory_manager_default_port(port)
-	const ipc_port_t port;
+boolean_t	memory_manager_default_port(const ipc_port_t port)
 {
 	ipc_port_t current;
 	boolean_t result;

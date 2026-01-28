@@ -27,6 +27,8 @@
 #ifndef	_I386_MP_DESC_H_
 #define	_I386_MP_DESC_H_
 
+#include <mach/kern_return.h>
+
 #if MULTIPROCESSOR
 
 /*
@@ -70,11 +72,12 @@ extern struct task_tss		*mp_ktss[NCPUS];
  */
 extern struct real_descriptor	*mp_gdt[NCPUS];
 
+extern uint8_t solid_intstack[];
 
 /*
  * Each CPU calls this routine to set up its descriptor tables.
  */
-extern struct mp_desc_table *	mp_desc_init(int);
+extern int mp_desc_init(int);
 
 
 extern void interrupt_processor(int cpu);
@@ -83,5 +86,9 @@ extern void interrupt_processor(int cpu);
 #endif /* MULTIPROCESSOR */
 
 extern void start_other_cpus(void);
+
+extern kern_return_t cpu_control(int cpu, const int *info, unsigned int count);
+
+extern void interrupt_stack_alloc(void);
 
 #endif	/* _I386_MP_DESC_H_ */

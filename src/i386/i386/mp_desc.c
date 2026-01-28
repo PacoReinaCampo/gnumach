@@ -24,22 +24,37 @@
  * the rights to redistribute these changes.
  */
 
-#if	NCPUS > 1
-
-#include <string.h> 
-
+#include <kern/assert.h>
 #include <kern/cpu_number.h>
 #include <kern/debug.h>
+#include <kern/printf.h>
+#include <kern/smp.h>
+#include <kern/startup.h>
+#include <kern/kmutex.h>
 #include <mach/machine.h>
 #include <mach/xen.h>
 #include <vm/vm_kern.h>
 
 #include <i386/mp_desc.h>
 #include <i386/lock.h>
+#include <i386/apic.h>
+#include <i386/locore.h>
+#include <i386/fpu.h>
+#include <i386/gdt.h>
+#include <i386at/idt.h>
+#include <i386at/int_init.h>
+#include <i386/cpu.h>
+#include <i386/smp.h>
+
+#include <i386at/model_dep.h>
 #include <machine/ktss.h>
+#include <machine/smp.h>
 #include <machine/tss.h>
 #include <machine/io_perm.h>
 #include <machine/vm_param.h>
+
+#include <i386at/acpi_parse_apic.h>
+#include <string.h>
 
 /*
  * The i386 needs an interrupt stack to keep the PCB stack from being
@@ -50,20 +65,39 @@
 /*
  * Addresses of bottom and top of interrupt stacks.
  */
-vm_offset_t	interrupt_stack[NCPUS];
 vm_offset_t	int_stack_top[NCPUS];
 vm_offset_t	int_stack_base[NCPUS];
 
 /*
- * Barrier address.
+ * Whether we are currently handling an interrupt.
+ * To catch code erroneously taking non-irq-safe locks.
  */
-vm_offset_t	int_stack_high;
+#ifdef MACH_LDEBUG
+unsigned long	in_interrupt[NCPUS];
+#endif
 
-/*
- * First cpu`s interrupt stack.
- */
-char		intstack[];	/* bottom */
-char		eintstack[];	/* top */
+/* Interrupt stack allocation */
+uint8_t solid_intstack[NCPUS*INTSTACK_SIZE] __aligned(INTSTACK_SIZE);
+
+void
+interrupt_stack_alloc(void)
+{
+	int i;
+
+	/*
+	 * Set up pointers to the top of the interrupt stack.
+	 */
+
+	for (i = 0; i < NCPUS; i++) {
+		int_stack_base[i] = (vm_offset_t) &solid_intstack[i * INTSTACK_SIZE];
+		int_stack_top[i] = (vm_offset_t) &solid_intstack[(i + 1) * INTSTACK_SIZE] - 4;
+	}
+}
+
+#if	NCPUS > 1
+phys_addr_t apboot_addr;
+extern void *apboot, *apbootend;
+extern volatile ApicLocalUnit* lapic;
 
 /*
  * Multiprocessor i386/i486 systems use a separate copy of the
@@ -75,7 +109,7 @@ char		eintstack[];	/* top */
  */
 
 /*
- * Allocated descriptor tables.
+ * Descriptor tables.
  */
 struct mp_desc_table	*mp_desc_table[NCPUS] = { 0 };
 
@@ -100,12 +134,13 @@ extern struct real_descriptor	ldt[LDTSZ];
  * Allocate and initialize the per-processor descriptor tables.
  */
 
-struct mp_desc_table *
+int
 mp_desc_init(int mycpu)
 {
 	struct mp_desc_table *mpt;
+	vm_offset_t mem;
 
-	if (mycpu == master_cpu) {
+	if (mycpu == 0) {
 		/*
 		 * Master CPU uses the tables built at boot time.
 		 * Just set the TSS and GDT pointers.
@@ -116,108 +151,26 @@ mp_desc_init(int mycpu)
 	}
 	else {
 		/*
-		 * Other CPUs allocate the table from the bottom of
-		 * the interrupt stack.
+		 * Allocate tables for other CPUs
 		 */
-		mpt = (struct mp_desc_table *) interrupt_stack[mycpu];
+		if (!init_alloc_aligned(sizeof(struct mp_desc_table), &mem))
+			panic("not enough memory for descriptor tables");
+		mpt = (struct mp_desc_table *)phystokv(mem);
 
 		mp_desc_table[mycpu] = mpt;
 		mp_ktss[mycpu] = &mpt->ktss;
 		mp_gdt[mycpu] = mpt->gdt;
 
 		/*
-		 * Copy the tables
+		 * Zero the tables
 		 */
-		memcpy(mpt->idt,
-		  idt,
-		  sizeof(idt));
-		memcpy(mpt->gdt,
-		  gdt,
-		  sizeof(gdt));
-		memcpy(mpt->ldt,
-		  ldt,
-		  sizeof(ldt));
-		memset(&mpt->ktss, 0, 
-		  sizeof(struct task_tss));
+		memset(mpt->idt, 0, sizeof(idt));
+		memset(mpt->gdt, 0, sizeof(gdt));
+		memset(mpt->ldt, 0, sizeof(ldt));
+		memset(&mpt->ktss, 0, sizeof(struct task_tss));
 
-		/*
-		 * Fix up the entries in the GDT to point to
-		 * this LDT and this TSS.
-		 */
-#ifdef	MACH_RING1
-		panic("TODO %s:%d\n",__FILE__,__LINE__);
-#else	/* MACH_RING1 */
-		_fill_gdt_sys_descriptor(mpt->gdt, KERNEL_LDT,
-			(unsigned)&mpt->ldt,
-			LDTSZ * sizeof(struct real_descriptor) - 1,
-			ACC_P|ACC_PL_K|ACC_LDT, 0);
-		_fill_gdt_sys_descriptor(mpt->gdt, KERNEL_TSS,
-			(unsigned)&mpt->ktss,
-			sizeof(struct task_tss) - 1,
-			ACC_P|ACC_PL_K|ACC_TSS, 0);
-
-		mpt->ktss.tss.ss0 = KERNEL_DS;
-		mpt->ktss.tss.io_bit_map_offset = IOPB_INVAL;
-		mpt->ktss.barrier = 0xFF;
-#endif	/* MACH_RING1 */
-
-		return mpt;
+		return mycpu;
 	}
-}
-
-kern_return_t intel_startCPU(int slot_num)
-{
-	printf("TODO: intel_startCPU\n");
-}
-
-/*
- * Called after all CPUs have been found, but before the VM system
- * is running.  The machine array must show which CPUs exist.
- */
-void
-interrupt_stack_alloc(void)
-{
-	int		i;
-	int		cpu_count;
-	vm_offset_t	stack_start;
-
-	/*
-	 * Count the number of CPUs.
-	 */
-	cpu_count = 0;
-	for (i = 0; i < NCPUS; i++)
-	    if (machine_slot[i].is_cpu)
-		cpu_count++;
-
-	/*
-	 * Allocate an interrupt stack for each CPU except for
-	 * the master CPU (which uses the bootstrap stack)
-	 */
-	if (!init_alloc_aligned(INTSTACK_SIZE*(cpu_count-1), &stack_start))
-		panic("not enough memory for interrupt stacks");
-	stack_start = phystokv(stack_start);
-
-	/*
-	 * Set up pointers to the top of the interrupt stack.
-	 */
-	for (i = 0; i < NCPUS; i++) {
-	    if (i == master_cpu) {
-		interrupt_stack[i] = (vm_offset_t) intstack;
-		int_stack_top[i]   = (vm_offset_t) eintstack;
-	    }
-	    else if (machine_slot[i].is_cpu) {
-		interrupt_stack[i] = stack_start;
-		int_stack_top[i]   = stack_start + INTSTACK_SIZE;
-
-		stack_start += INTSTACK_SIZE;
-	    }
-	}
-
-	/*
-	 * Set up the barrier address.  All thread stacks MUST
-	 * be above this address.
-	 */
-	int_stack_high = stack_start;
 }
 
 /* XXX should be adjusted per CPU speed */
@@ -252,25 +205,140 @@ cpu_control(int cpu, const int *info, unsigned int count)
 void
 interrupt_processor(int cpu)
 {
-	printf("interrupt cpu %d\n",cpu);
+	smp_pmap_update(APIC_LOGICAL_ID(cpu));
 }
 
-kern_return_t
-cpu_start(int cpu)
+static void
+paging_enable(void)
 {
-	if (machine_slot[cpu].running)
-		return KERN_FAILURE;
+#ifndef MACH_HYP
+    /* Turn paging on.
+     * TODO: Why does setting the WP bit here cause a crash?
+     */
+#if PAE
+    set_cr4(get_cr4() | CR4_PAE);
+#endif
+    set_cr0(get_cr0() | CR0_PG /* | CR0_WP */);
+    set_cr0(get_cr0() & ~(CR0_CD | CR0_NW));
+    if (CPU_HAS_FEATURE(CPU_FEATURE_PGE))
+        set_cr4(get_cr4() | CR4_PGE);
+#endif  /* MACH_HYP */
+}
 
-	return intel_startCPU(cpu);
+static __attribute__((noreturn)) void
+cpu_setup(int cpu)
+{
+    pmap_set_page_dir();
+    printf("AP=(%u) pagedir done\n", cpu);
+
+    paging_enable();
+    flush_instr_queue();
+    printf("AP=(%u) paging done\n", cpu);
+
+    init_percpu(cpu);
+    mp_desc_init(cpu);
+    printf("AP=(%u) mpdesc done\n", cpu);
+
+    ap_gdt_init(cpu);
+    printf("AP=(%u) gdt done\n", cpu);
+
+    ap_idt_init(cpu);
+    printf("AP=(%u) idt done\n", cpu);
+
+    ap_int_init(cpu);
+    printf("AP=(%u) int done\n", cpu);
+
+    ap_ldt_init(cpu);
+    printf("AP=(%u) ldt done\n", cpu);
+
+    ap_ktss_init(cpu);
+    printf("AP=(%u) ktss done\n", cpu);
+
+    /* Initialize machine_slot fields with the cpu data */
+    machine_slot[cpu].cpu_subtype = CPU_SUBTYPE_AT386;
+    machine_slot[cpu].cpu_type = machine_slot[0].cpu_type;
+
+    init_fpu();
+    lapic_setup();
+    lapic_enable();
+    cpu_launch_first_thread(THREAD_NULL);
+    /*NOTREACHED*/
+}
+
+void __attribute__((noreturn))
+cpu_ap_main()
+{
+    int cpu = cpu_number();
+
+    assert(cpu > 0);
+
+    cpu_setup(cpu);
 }
 
 void
 start_other_cpus(void)
 {
-	int cpu;
-	for (cpu = 0; cpu < NCPUS; cpu++)
-		if (cpu != cpu_number())
-			cpu_start(cpu);
-}
+	int ncpus = smp_get_numcpus();
 
+	if (ncpus == 1)
+	  return;
+
+	//Copy cpu initialization assembly routine
+#ifdef __i386__
+	memcpy((void*) phystokv(apboot_addr), (void*) &apboot,
+	       (uintptr_t)&apbootend - (uintptr_t)&apboot);
+#endif
+#ifdef __x86_64__
+	/* apboot is located in section .boot.text which is at a 32 bit offset.
+	 * To access it here, we need to add KERNEL_MAP_BASE. */
+	memcpy((void*) phystokv(apboot_addr), (void*) phystokv(&apboot),
+	       (uintptr_t)&apbootend - (uintptr_t)&apboot);
+#endif
+
+	unsigned cpu = cpu_number_slow();
+
+	assert (cpu == 0);
+
+	splhigh();
+
+	/* Disable IOAPIC interrupts (IPIs not affected).
+	 * Clearing this flag is similar to masking all
+	 * IOAPIC interrupts individually.
+	 *
+	 * This is done to prevent IOAPIC interrupts from
+	 * interfering with SMP startup. splhigh() may be enough for BSP,
+	 * but I'm not sure.  We cannot control the lapic
+	 * on APs because we don't have execution on them yet.
+	 */
+	lapic_disable();
+
+	/* This is set once for all APs to use */
+	pmap_make_temporary_mapping();
+
+	for (cpu = 1; cpu < ncpus; cpu++) {
+		machine_slot[cpu].running = FALSE;
+	}
+
+	smp_startup_cpus(apic_get_current_cpu(), apboot_addr);
+
+	for (cpu = 1; cpu < ncpus; cpu++) {
+		printf("Waiting for AP %d\n", cpu);
+
+		do {
+			cpu_pause();
+		} while (machine_slot[cpu].running == FALSE);
+	}
+	printf("BSP: Completed SMP init\n");
+
+	pmap_remove_temporary_mapping();
+
+	/* Flush TLB on all cpu groups */
+	ncpus = (ncpus < APIC_LOGICAL_CPU_GROUPS) ? ncpus : APIC_LOGICAL_CPU_GROUPS;
+	for (cpu = 1; cpu < ncpus; cpu++) {
+		interrupt_processor(cpu);
+	}
+
+	/* Re-enable IOAPIC interrupts as per setup */
+	lapic_enable();
+}
 #endif	/* NCPUS > 1 */

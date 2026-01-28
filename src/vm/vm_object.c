@@ -35,6 +35,7 @@
 
 #include <kern/printf.h>
 #include <string.h>
+#include <stdint.h>
 
 #include <mach/memory_object.h>
 #include <vm/memory_object_default.user.h>
@@ -44,6 +45,7 @@
 #include <ipc/ipc_space.h>
 #include <kern/assert.h>
 #include <kern/debug.h>
+#include <kern/mach.server.h>
 #include <kern/lock.h>
 #include <kern/queue.h>
 #include <kern/xpr.h>
@@ -182,7 +184,7 @@ vm_object_t		kernel_object = &kernel_object_store;
  */
 queue_head_t	vm_object_cached_list;
 
-decl_simple_lock_data(,vm_object_cached_lock_data)
+def_simple_lock_data(static,vm_object_cached_lock_data)
 
 #define vm_object_cache_lock()		\
 		simple_lock(&vm_object_cached_lock_data)
@@ -190,15 +192,8 @@ decl_simple_lock_data(,vm_object_cached_lock_data)
 		simple_lock_try(&vm_object_cached_lock_data)
 #define vm_object_cache_unlock()	\
 		simple_unlock(&vm_object_cached_lock_data)
-
-/*
- *	Number of physical pages referenced by cached objects.
- *	This counter is protected by its own lock to work around
- *	lock ordering issues.
- */
-int		vm_object_cached_pages;
-
-decl_simple_lock_data(,vm_object_cached_pages_lock_data)
+#define vm_object_cache_locked()		\
+		simple_lock_taken(&vm_object_cached_lock_data)
 
 /*
  *	Virtual memory objects are initialized from
@@ -226,7 +221,7 @@ static void _vm_object_setup(
 	object->size = size;
 }
 
-vm_object_t _vm_object_allocate(
+static vm_object_t _vm_object_allocate(
 	vm_size_t		size)
 {
 	vm_object_t object;
@@ -358,6 +353,9 @@ void vm_object_init(void)
 static void vm_object_cache_add(
 	vm_object_t	object)
 {
+	assert(vm_object_lock_taken(object));
+	assert(vm_object_cache_locked());
+
 	assert(!object->cached);
 	queue_enter(&vm_object_cached_list, object, vm_object_t, cached_list);
 	object->cached = TRUE;
@@ -366,6 +364,9 @@ static void vm_object_cache_add(
 static void vm_object_cache_remove(
 	vm_object_t	object)
 {
+	assert(vm_object_lock_taken(object));
+	assert(vm_object_cache_locked());
+
 	assert(object->cached);
 	queue_remove(&vm_object_cached_list, object, vm_object_t, cached_list);
 	object->cached = FALSE;
@@ -527,6 +528,9 @@ void vm_object_terminate(
 {
 	vm_page_t	p;
 	vm_object_t	shadow_object;
+
+	assert(vm_object_lock_taken(object));
+	assert(vm_object_cache_locked());
 
 	/*
 	 *	Make sure the object isn't already being terminated
@@ -725,11 +729,13 @@ void memory_object_release(
  *	In/out conditions:
  *		The object is locked on entry and exit.
  */
-void vm_object_abort_activity(
+static void vm_object_abort_activity(
 	vm_object_t	object)
 {
 	vm_page_t	p;
 	vm_page_t	next;
+
+	assert(vm_object_lock_taken(object));
 
 	/*
 	 *	Abort all activity that would be waiting
@@ -981,12 +987,28 @@ void vm_object_pmap_remove(
 		return;
 
 	vm_object_lock(object);
-	queue_iterate(&object->memq, p, vm_page_t, listq) {
+
+	while (TRUE) {
+	     queue_iterate(&object->memq, p, vm_page_t, listq) {
 		if (!p->fictitious &&
 		    (start <= p->offset) &&
 		    (p->offset < end))
 			pmap_page_protect(p->phys_addr, VM_PROT_NONE);
+	     }
+
+	     if (object->shadow == VM_OBJECT_NULL)
+	       break;
+
+	     vm_object_t prev_object = object;
+
+	     start += object->shadow_offset;
+	     end   += object->shadow_offset;
+	     object = object->shadow;
+
+	     vm_object_lock(object);
+	     vm_object_unlock(prev_object);
 	}
+
 	vm_object_unlock(object);
 }
 
@@ -1030,6 +1052,8 @@ kern_return_t vm_object_copy_slowly(
 	vm_object_t	new_object;
 	vm_offset_t	new_offset;
 
+	assert(vm_object_lock_taken(src_object));
+
 	if (size == 0) {
 		vm_object_unlock(src_object);
 		*_result_object = VM_OBJECT_NULL;
@@ -1065,10 +1089,14 @@ kern_return_t vm_object_copy_slowly(
 		vm_page_t	new_page;
 		vm_fault_return_t result;
 
+		vm_object_lock(new_object);
 		while ((new_page = vm_page_alloc(new_object, new_offset))
 				== VM_PAGE_NULL) {
+			vm_object_unlock(new_object);
 			VM_PAGE_WAIT((void (*)()) 0);
+			vm_object_lock(new_object);
 		}
+		vm_object_unlock(new_object);
 
 		do {
 			vm_prot_t	prot = VM_PROT_READ;
@@ -1288,7 +1316,7 @@ boolean_t vm_object_copy_temporary(
  *		If the return value indicates an error, this parameter
  *		is not valid.
  */
-kern_return_t vm_object_copy_call(
+static kern_return_t vm_object_copy_call(
 	vm_object_t	src_object,
 	vm_offset_t	src_offset,
 	vm_size_t	size,
@@ -1298,6 +1326,8 @@ kern_return_t vm_object_copy_call(
 	ipc_port_t	new_memory_object;
 	vm_object_t	new_object;
 	vm_page_t	p;
+
+	assert(vm_object_lock_taken(src_object));
 
 	/*
 	 *	Create a memory object port to be associated
@@ -1912,7 +1942,9 @@ void vm_object_destroy(
 	 *	Restart pending page requests
 	 */
 
+	vm_object_lock(object);
 	vm_object_abort_activity(object);
+	vm_object_unlock(object);
 
 	/*
 	 *	Lose the object reference.
@@ -2150,6 +2182,8 @@ void vm_object_pager_create(
 {
 	ipc_port_t	pager;
 
+	assert(vm_object_lock_taken(object));
+
 	if (object->pager_created) {
 		/*
 		 *	Someone else got to it first...
@@ -2244,6 +2278,8 @@ void vm_object_remove(
 {
 	ipc_port_t port;
 
+	assert(vm_object_cache_locked());
+
 	if ((port = object->pager) != IP_NULL) {
 		if (ip_kotype(port) == IKOT_PAGER)
 			ipc_kobject_set(port, IKO_NULL,
@@ -2298,6 +2334,8 @@ void vm_object_collapse(
 	vm_offset_t	new_offset;
 	vm_page_t	p, pp;
 	ipc_port_t 	old_name_port;
+
+	assert(vm_object_lock_taken(object));
 
 	if (!vm_object_collapse_allowed)
 		return;
@@ -2649,6 +2687,8 @@ void vm_object_page_remove(
 {
 	vm_page_t	p, next;
 
+	assert(vm_object_lock_taken(object));
+
 	/*
 	 *	One and two page removals are most popular.
 	 *	The factor of 16 here is somewhat arbitrary.
@@ -2686,14 +2726,16 @@ void vm_object_page_remove(
 
 /*
  *	Routine:	vm_object_coalesce
- *	Function:	Coalesces two objects backing up adjoining
- *			regions of memory into a single object.
+ *	Purpose:
+ *		Tries to coalesce two objects backing up adjoining
+ *		regions	of memory into a single object.
  *
- *	returns TRUE if objects were combined.
- *
- *	NOTE:	Only works at the moment if the second object is NULL -
- *		if it's not, which object do we lock first?
- *
+ *		NOTE: Only works at the moment if one of the objects
+ *		is NULL	or if the objects are the same - otherwise,
+ *		which object do we lock first?
+ *	Returns:
+ *		TRUE	if objects have been coalesced.
+ *		FALSE	the objects could not be coalesced.
  *	Parameters:
  *		prev_object	First object to coalesce
  *		prev_offset	Offset into prev_object
@@ -2703,8 +2745,14 @@ void vm_object_page_remove(
  *		prev_size	Size of reference to prev_object
  *		next_size	Size of reference to next_object
  *
+ *		new_object	Resulting colesced object
+ *		new_offset	Offset into the resulting object
  *	Conditions:
- *	The object must *not* be locked.
+ *		The objects must *not* be locked.
+ *
+ *		If the objects are coalesced successfully, the caller's
+ *		references for both objects are consumed, and the caller
+ *		gains a reference for the new object.
  */
 
 boolean_t vm_object_coalesce(
@@ -2713,28 +2761,60 @@ boolean_t vm_object_coalesce(
 	vm_offset_t	prev_offset,
 	vm_offset_t	next_offset,
 	vm_size_t	prev_size,
-	vm_size_t	next_size)
+	vm_size_t	next_size,
+	vm_object_t	*new_object,	/* OUT */
+	vm_offset_t	*new_offset)	/* OUT */
 {
+	vm_object_t	object;
 	vm_size_t	newsize;
 
-	if (next_object != VM_OBJECT_NULL) {
+	if (prev_object == next_object) {
+		/*
+		 *	If neither object actually exists,
+		 *	the offsets don't matter.
+		 */
+		if (prev_object == VM_OBJECT_NULL) {
+			*new_object = VM_OBJECT_NULL;
+			*new_offset = 0;
+			return TRUE;
+		}
+
+		if (prev_offset + prev_size == next_offset) {
+			*new_object = prev_object;
+			*new_offset = prev_offset;
+			/*
+			 *	Deallocate one of the two references.
+			 */
+			vm_object_deallocate(prev_object);
+			return TRUE;
+		}
+
 		return FALSE;
 	}
 
-	if (prev_object == VM_OBJECT_NULL) {
-		return TRUE;
+	if (next_object != VM_OBJECT_NULL) {
+		/*
+		 *	Don't know how to merge two different
+		 *	objects yet.
+		 */
+		if (prev_object != VM_OBJECT_NULL)
+			return FALSE;
+
+		object = next_object;
+	} else {
+		object = prev_object;
 	}
 
-	vm_object_lock(prev_object);
+	vm_object_lock(object);
 
 	/*
 	 *	Try to collapse the object first
 	 */
-	vm_object_collapse(prev_object);
+	vm_object_collapse(object);
 
 	/*
 	 *	Can't coalesce if pages not mapped to
-	 *	prev_entry may be in use anyway:
+	 *	the object may be in use anyway:
 	 *	. more than one reference
 	 *	. paged out
 	 *	. shadows another object
@@ -2742,33 +2822,55 @@ boolean_t vm_object_coalesce(
 	 *	. paging references (pages might be in page-list)
 	 */
 
-	if ((prev_object->ref_count > 1) ||
-	    prev_object->pager_created ||
-	    prev_object->used_for_pageout ||
-	    (prev_object->shadow != VM_OBJECT_NULL) ||
-	    (prev_object->copy != VM_OBJECT_NULL) ||
-	    (prev_object->paging_in_progress != 0)) {
-		vm_object_unlock(prev_object);
+	if ((object->ref_count > 1) ||
+	    object->pager_created ||
+	    object->used_for_pageout ||
+	    (object->shadow != VM_OBJECT_NULL) ||
+	    (object->copy != VM_OBJECT_NULL) ||
+	    (object->paging_in_progress != 0)) {
+		vm_object_unlock(object);
 		return FALSE;
 	}
 
-	/*
-	 *	Remove any pages that may still be in the object from
-	 *	a previous deallocation.
-	 */
-
-	vm_object_page_remove(prev_object,
+	if (object == prev_object) {
+		/*
+		 *	Remove any pages that may still be in
+		 *	the object from a previous deallocation.
+		 */
+		vm_object_page_remove(object,
 			prev_offset + prev_size,
 			prev_offset + prev_size + next_size);
+		/*
+		 *	Extend the object if necessary.
+		 */
+		newsize = prev_offset + prev_size + next_size;
+		if (newsize > object->size)
+			object->size = newsize;
 
-	/*
-	 *	Extend the object if necessary.
-	 */
-	newsize = prev_offset + prev_size + next_size;
-	if (newsize > prev_object->size)
-		prev_object->size = newsize;
+		*new_offset = prev_offset;
+	} else {
+		/*
+		 *	Check if we have enough space in the object
+		 *	offset space to insert the new mapping before
+		 *	the existing one.
+		 */
+		if (next_offset < prev_size) {
+			vm_object_unlock(object);
+			return FALSE;
+		}
+		/*
+		 *	Remove any pages that may still be in
+		 *	the object from a previous deallocation.
+		 */
+		vm_object_page_remove(object,
+			next_offset - prev_size,
+			next_offset);
 
-	vm_object_unlock(prev_object);
+		*new_offset = next_offset - prev_size;
+	}
+
+	vm_object_unlock(object);
+	*new_object = object;
 	return TRUE;
 }
 
@@ -2816,25 +2918,27 @@ ipc_port_t	vm_object_name(
  *	The mapping function and its private data are used to obtain the
  *	physical addresses for each page to be mapped.
  */
-void
+kern_return_t
 vm_object_page_map(
 	vm_object_t	object,
 	vm_offset_t	offset,
 	vm_size_t	size,
-	vm_offset_t	(*map_fn)(void *, vm_offset_t),
+	phys_addr_t	(*map_fn)(void *, vm_offset_t),
 	void *		map_fn_data)	/* private to map_fn */
 {
 	int	num_pages;
 	int	i;
 	vm_page_t	m;
 	vm_page_t	old_page;
-	vm_offset_t	addr;
+	phys_addr_t	addr;
 
 	num_pages = atop(size);
 
 	for (i = 0; i < num_pages; i++, offset += PAGE_SIZE) {
 
 	    addr = (*map_fn)(map_fn_data, offset);
+	    if (addr == vm_page_fictitious_addr)
+		return KERN_NO_ACCESS;
 
 	    while ((m = vm_page_grab_fictitious()) == VM_PAGE_NULL)
 		vm_page_more_fictitious();
@@ -2857,6 +2961,7 @@ vm_object_page_map(
 	    PAGE_WAKEUP_DONE(m);
 	    vm_object_unlock(object);
 	}
+	return KERN_SUCCESS;
 }
 
 
@@ -2869,12 +2974,14 @@ boolean_t	vm_object_print_pages = FALSE;
 /*
  *	vm_object_print:	[ debug ]
  */
-void vm_object_print(
-	vm_object_t	object)
+void vm_object_print_part(
+	vm_object_t	object,
+	vm_offset_t	offset,
+	vm_size_t	size)
 {
 	vm_page_t	p;
 
-	int 		count;
+	int 		count, count2;
 
 	if (object == VM_OBJECT_NULL)
 		return;
@@ -2905,24 +3012,46 @@ void vm_object_print(
 		(vm_offset_t) object->shadow, (vm_offset_t) object->shadow_offset);
 	 printf("copy=0x%X\n", (vm_offset_t) object->copy);
 
+	count = 0;
+	count2 = 0;
+	p = (vm_page_t) queue_first(&object->memq);
+	while (!queue_end(&object->memq, (queue_entry_t) p)) {
+		if (p->offset >= offset && p->offset + PAGE_SIZE <= size) {
+			if (p->wire_count)
+				count++;
+			count2++;
+		}
+		p = (vm_page_t) queue_next(&p->listq);
+	}
+	iprintf("wired: %d/%d\n", count, count2);
+
 	indent += 1;
 
 	if (vm_object_print_pages) {
 		count = 0;
 		p = (vm_page_t) queue_first(&object->memq);
 		while (!queue_end(&object->memq, (queue_entry_t) p)) {
-			if (count == 0) iprintf("memory:=");
-			else if (count == 4) {printf("\n"); iprintf(" ..."); count = 0;}
-			else printf(",");
-			count++;
+			if (p->offset >= offset && p->offset + PAGE_SIZE <= size) {
+				if (count == 0) iprintf("memory:=");
+				else if (count == 4) {printf("\n"); iprintf(" ..."); count = 0;}
+				else printf(",");
+				count++;
 
-			printf("(off=0x%X,page=0x%X)", p->offset, (vm_offset_t) p);
+				printf("(off=0x%X,page=0x%X)", p->offset, (vm_offset_t) p);
+			}
+
 			p = (vm_page_t) queue_next(&p->listq);
 		}
 		if (count != 0)
 			printf("\n");
 	}
 	indent -= 2;
+}
+
+void vm_object_print(
+	vm_object_t	object)
+{
+	vm_object_print_part(object, 0, UINTPTR_MAX);
 }
 
 #endif	/* MACH_KDB */

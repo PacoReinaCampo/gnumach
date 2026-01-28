@@ -70,10 +70,10 @@ struct db_variable db_vars[] = {
 };
 struct db_variable *db_evars = db_vars + sizeof(db_vars)/sizeof(db_vars[0]);
 
-const char *
-db_get_suffix(suffix, suffix_value)
-	const char	*suffix;
-	short		*suffix_value;
+static const char *
+db_get_suffix(
+	const char	*suffix,
+	short		*suffix_value)
 {
 	int value;
 
@@ -89,10 +89,10 @@ db_get_suffix(suffix, suffix_value)
 }
 
 static boolean_t
-db_cmp_variable_name(vp, name, ap)
-	struct db_variable		*vp;
-	char				*name;
-	const db_var_aux_param_t	ap;
+db_cmp_variable_name(
+	struct db_variable		*vp,
+	char				*name,
+	const db_var_aux_param_t	ap)
 {
 	char *var_np;
 	const char *np;
@@ -116,7 +116,7 @@ db_cmp_variable_name(vp, name, ap)
 	return(TRUE);
 }
 
-int
+static int
 db_find_variable(
 	struct db_variable	**varp,
 	db_var_aux_param_t	ap)
@@ -160,22 +160,6 @@ db_get_variable(db_expr_t *valuep)
 	return (1);
 }
 
-int
-db_set_variable(db_expr_t value)
-{
-	struct db_variable *vp;
-	struct db_var_aux_param aux_param;
-	char		modif[TOK_STRING_SIZE];
-
-	aux_param.modif = modif;
-	if (!db_find_variable(&vp, &aux_param))
-	    return (0);
-
-	db_read_write_variable(vp, &value, DB_VAR_SET, &aux_param);
-
-	return (1);
-}
-
 void
 db_read_write_variable(
 	struct db_variable	*vp,
@@ -183,7 +167,7 @@ db_read_write_variable(
 	int 			rw_flag,
 	db_var_aux_param_t	ap)
 {
-	void	(*func)() = vp->fcn;
+	void	(*func)(struct db_variable *, db_expr_t *, int, db_var_aux_param_t) = vp->fcn;
 	struct  db_var_aux_param aux_param;
 
 	if (ap == 0) {

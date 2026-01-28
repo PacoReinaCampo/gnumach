@@ -85,10 +85,12 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <device/io_req.h>
 #include <device/buf.h>
 #include <vm/vm_kern.h>
+#include <i386/db_interface.h>
+#include <i386/irq.h>
 #include <i386/locore.h>
 #include <i386/loose_ends.h>
 #include <i386/vm_param.h>
-#include <i386/machspl.h>
+#include <i386/spl.h>
 #include <i386/pio.h>
 #include <i386at/cram.h>
 #include <i386at/kd.h>
@@ -107,20 +109,24 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 struct tty       kd_tty;
 extern boolean_t rebootflag;
 
-static void charput(), charmvup(), charmvdown(), charclear(), charsetcursor();
+static void charput(csrpos_t pos, char ch, char chattr);
+static void charmvup(csrpos_t from, csrpos_t to, int count);
+static void charmvdown(csrpos_t from, csrpos_t to, int count);
+static void charclear(csrpos_t to, int count, char chattr);
+static void charsetcursor(csrpos_t newpos);
 static void kd_noopreset(void);
 
 /*
  * These routines define the interface to the device-specific layer.
  * See kdsoft.h for a more complete description of what each routine does.
  */
-void	(*kd_dput)()	= charput;	/* put attributed char */
-void	(*kd_dmvup)()	= charmvup;	/* block move up */
-void	(*kd_dmvdown)()	= charmvdown;	/* block move down */
-void	(*kd_dclear)()	= charclear;	/* block clear */
-void	(*kd_dsetcursor)() = charsetcursor;
+void	(*kd_dput)(csrpos_t, char, char) = charput;	/* put attributed char */
+void	(*kd_dmvup)(csrpos_t, csrpos_t, int)	= charmvup;	/* block move up */
+void	(*kd_dmvdown)(csrpos_t, csrpos_t, int)	= charmvdown;	/* block move down */
+void	(*kd_dclear)(csrpos_t, int, char)	= charclear;	/* block clear */
+void	(*kd_dsetcursor)(csrpos_t) = charsetcursor;
 				/* set cursor position on displayed page */
-void	(*kd_dreset)() = kd_noopreset;	/* prepare for reboot */
+void	(*kd_dreset)(void) = kd_noopreset;	/* prepare for reboot */
 
 /*
  * Globals used for both character-based controllers and bitmap-based
@@ -342,6 +348,15 @@ short	font_byte_width	= 0;		/* num bytes in 1 scan line of font */
 int	kd_pollc = 0;
 
 #ifdef	DEBUG
+static void
+pause(void)
+{
+	int i;
+
+	for (i = 0; i < 50000; ++i)
+		;
+}
+
 /*
  * feep:
  *
@@ -351,21 +366,9 @@ int	kd_pollc = 0;
 void
 feep(void)
 {
-	int i;
-
 	kd_bellon();
-	for (i = 0; i < 50000; ++i)
-		;
+	pause();
 	kd_belloff(NULL);
-}
-
-void
-pause(void)
-{
-	int i;
-
-	for (i = 0; i < 50000; ++i)
-		;
 }
 
 /*
@@ -439,26 +442,24 @@ kdopen(
 	spl_t	o_pri;
 
 	tp = &kd_tty;
-	o_pri = spltty();
-	simple_lock(&tp->t_lock);
+	o_pri = simple_lock_irq(&tp->t_lock);
 	if (!(tp->t_state & (TS_ISOPEN|TS_WOPEN))) {
 		/* XXX ttychars allocates memory */
-		simple_unlock(&tp->t_lock);
+		simple_unlock_nocheck(&tp->t_lock.slock);
 		ttychars(tp);
-		simple_lock(&tp->t_lock);
+		simple_lock_nocheck(&tp->t_lock.slock);
 		/*
 		 *	Special support for boot-time rc scripts, which don't
 		 *	stty the console.
 		 */
 		tp->t_oproc = kdstart;
 		tp->t_stop = kdstop;
-		tp->t_ospeed = tp->t_ispeed = B9600;
-		tp->t_flags = ODDP|EVENP|ECHO|CRMOD|XTABS;
+		tp->t_ospeed = tp->t_ispeed = B115200;
+		tp->t_flags = ODDP|EVENP|ECHO|CRMOD|XTABS|LITOUT;
 		kdinit();
 	}
 	tp->t_state |= TS_CARR_ON;
-	simple_unlock(&tp->t_lock);
-	splx(o_pri);
+	simple_unlock_irq(o_pri, &tp->t_lock);
 	return (char_open(dev, tp, flag, ior));
 }
 
@@ -476,19 +477,16 @@ kdopen(
  */
 /*ARGSUSED*/
 void
-kdclose(dev, flag)
-dev_t	dev;
-int	flag;
+kdclose(dev_t dev, int flag)
 {
 	struct	tty	*tp;
 
 	tp = &kd_tty;
 	{
-	    spl_t s = spltty();
-	    simple_lock(&tp->t_lock);
+	    spl_t s;
+	    s = simple_lock_irq(&tp->t_lock);
 	    ttyclose(tp);
-	    simple_unlock(&tp->t_lock);
-	    splx(s);
+	    simple_unlock_irq(s, &tp->t_lock);
 	}
 
 	return;
@@ -508,9 +506,7 @@ int	flag;
  */
 /*ARGSUSED*/
 int
-kdread(dev, uio)
-dev_t	dev;
-io_req_t uio;
+kdread(dev_t dev, io_req_t uio)
 {
 	struct	tty	*tp;
 
@@ -533,9 +529,7 @@ io_req_t uio;
  */
 /*ARGSUSED*/
 int
-kdwrite(dev, uio)
-dev_t	dev;
-io_req_t uio;
+kdwrite(dev_t dev, io_req_t uio)
 {
 	return((*linesw[kd_tty.t_line].l_write)(&kd_tty, uio));
 }
@@ -546,10 +540,7 @@ io_req_t uio;
 
 /*ARGSUSED*/
 vm_offset_t
-kdmmap(dev, off, prot)
-	dev_t dev;
-	vm_offset_t off;
-	vm_prot_t prot;
+kdmmap(dev_t dev, vm_offset_t off, vm_prot_t prot)
 {
 	if (off >= (128*1024))
 		return(-1);
@@ -1015,9 +1006,8 @@ kdcheckmagic(Scancode scancode)
  *	corresponds to the given state.
  */
 unsigned int
-kdstate2idx(state, extended)
-unsigned int	state;			/* bit vector, not a state index */
-boolean_t	extended;
+kdstate2idx(unsigned int	state,			/* bit vector, not a state index */
+	boolean_t	extended)
 {
 	int state_idx = NORM_STATE;
 
@@ -1138,6 +1128,7 @@ kdinit(void)
 	k_comm |= K_CB_ENBLIRQ;		/* enable interrupt */
 	kd_sendcmd(KC_CMD_WRITE);	/* write new ctlr command byte */
 	kd_senddata(k_comm);
+	unmask_irq(KBD_IRQ);
 	kd_initialized = TRUE;
 
 #if	ENABLE_IMMEDIATE_CONSOLE
@@ -1444,7 +1435,7 @@ kd_parseesc(void)
  */
 
 #define reverse_video_char(a)       (((a) & 0x88) | ((((a) >> 4) | ((a) << 4)) & 0x77))
-void
+static void
 kd_update_kd_attr(void)
 {
 	kd_attr = kd_color;
@@ -1484,6 +1475,16 @@ kd_parserest(u_char *cp)
 {
 	int	number[16], npar = 0, i;
 	csrpos_t newpos;
+	boolean_t question = FALSE;
+	boolean_t angle = FALSE;
+
+	if (*cp == '?') {
+		question = TRUE;
+		cp++;
+	} else if (*cp == '<') {
+		angle = TRUE;
+		cp++;
+	}
 
 	for(i=0;i<=15;i++)
 		number[i] = MACH_ATOI_DEFAULT;
@@ -1492,253 +1493,300 @@ kd_parserest(u_char *cp)
 		cp += mach_atoi(cp, &number[npar]);
 	} while (*cp == ';' && ++npar <= 15 && cp++);
 	
-	switch(*cp) {
-	case 'm':
-		for (i=0;i<=npar;i++)
-			switch(number[i]) {
-			case MACH_ATOI_DEFAULT:
-			case 0:
-				kd_attrflags = 0;
-				kd_color = KA_NORMAL;
-				break;
-			case 1:
-				kd_attrflags |= KAX_BOLD;
-				kd_attrflags &= ~KAX_DIM;
-				break;
-			case 2:
-				kd_attrflags |= KAX_DIM;
-				kd_attrflags &= ~KAX_BOLD;
-				break;
-			case 4:
-				kd_attrflags |= KAX_UNDERLINE;
-				break;
-			case 5:
-				kd_attrflags |= KAX_BLINK;
-				break;
-			case 7:
-				kd_attrflags |= KAX_REVERSE;
-				break;
-			case 8:
-				kd_attrflags |= KAX_INVISIBLE;
-				break;
-			case 21:
-			case 22:
-				kd_attrflags &= ~(KAX_BOLD | KAX_DIM);
-				break;
-			case 24:
-				kd_attrflags &= ~KAX_UNDERLINE;
-				break;
-			case 25:
-				kd_attrflags &= ~KAX_BLINK;
-				break;
-			case 27:
-				kd_attrflags &= ~KAX_REVERSE;
-				break;
-			case 38:
-				kd_attrflags |= KAX_UNDERLINE;
-				kd_color = (kd_color & 0xf0) | (KA_NORMAL & 0x0f);
-				break;
-			case 39:
-				kd_attrflags &= ~KAX_UNDERLINE;
-				kd_color = (kd_color & 0xf0) | (KA_NORMAL & 0x0f);
-				break;
-			default:
-			  if (number[i] >= 30 && number[i] <= 37) {
-			    /* foreground color */
-			    kd_color = (kd_color & 0xf0) | color_table[(number[i] - 30)];
-			  } else if (number[i] >= 40 && number[i] <= 47) {
-			    /* background color */
-			    kd_color = (kd_color & 0x0f) | (color_table[(number[i] - 40)] << 4);
-			  }
-			  break;
+	if (question) {
+		/* \e[?... */
+		switch(*cp) {
+		case '\0':
+			break;			/* not enough yet */
+		default:
+			if (*cp >= '@' && *cp <= '~')
+			{
+				/* Unsupported sequence, just silently drop */
 			}
-		kd_update_kd_attr();
-		esc_spt = esc_seq;
-		break;
-	case '@':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_insch(1);
-		else
-			kd_insch(number[0]);
-		esc_spt = esc_seq;
-		break;
-	case 'A':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_up();
-		else
-			while (number[0]--)
-				kd_up();
-		esc_spt = esc_seq;
-		break;
-	case 'B':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_down();
-		else
-			while (number[0]--)
-				kd_down();
-		esc_spt = esc_seq;
-		break;
-	case 'C':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_right();
-		else
-			while (number[0]--)
-				kd_right();
-		esc_spt = esc_seq;
-		break;
-	case 'D':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_left();
-		else
-			while (number[0]--)
-				kd_left();
-		esc_spt = esc_seq;
-		break;
-	case 'E':
-		kd_cr();
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_down();
-		else
-			while (number[0]--)
-				kd_down();
-		esc_spt = esc_seq;
-		break;
-	case 'F':
-		kd_cr();
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_up();
-		else
-			while (number[0]--)
-				kd_up();
-		esc_spt = esc_seq;
-		break;
-	case 'G':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			number[0] = 0;
-		else
-			if (number[0] > 0)
-				--number[0];	/* because number[0] is from 1 */
-		kd_setpos(BEG_OF_LINE(kd_curpos) + number[0] * ONE_SPACE);
-		esc_spt = esc_seq;
-		break;
-	case 'f':
-	case 'H':
-		if (number[0] == MACH_ATOI_DEFAULT && number[1] == MACH_ATOI_DEFAULT)
-		{
-			kd_home();
+			else
+			{
+				/* Odd sequence, print it */
+				kd_putc(*cp);	/* show inv character */
+			}
+			esc_spt = esc_seq;	/* inv entry, reset */
+			break;
+		}
+	} else if (angle) {
+		/* \e[<... */
+		switch(*cp) {
+		case '\0':
+			break;			/* not enough yet */
+		default:
+			if (*cp >= '@' && *cp <= '~')
+			{
+				/* Unsupported sequence, just silently drop */
+			}
+			else
+			{
+				/* Odd sequence, print it */
+				kd_putc(*cp);	/* show inv character */
+			}
+			esc_spt = esc_seq;	/* inv entry, reset */
+			break;
+		}
+	} else {
+		/* \e[... */
+		switch(*cp) {
+		case 'm':
+			for (i=0;i<=npar;i++)
+				switch(number[i]) {
+				case MACH_ATOI_DEFAULT:
+				case 0:
+					kd_attrflags = 0;
+					kd_color = KA_NORMAL;
+					break;
+				case 1:
+					kd_attrflags |= KAX_BOLD;
+					kd_attrflags &= ~KAX_DIM;
+					break;
+				case 2:
+					kd_attrflags |= KAX_DIM;
+					kd_attrflags &= ~KAX_BOLD;
+					break;
+				case 4:
+					kd_attrflags |= KAX_UNDERLINE;
+					break;
+				case 5:
+					kd_attrflags |= KAX_BLINK;
+					break;
+				case 7:
+					kd_attrflags |= KAX_REVERSE;
+					break;
+				case 8:
+					kd_attrflags |= KAX_INVISIBLE;
+					break;
+				case 21:
+				case 22:
+					kd_attrflags &= ~(KAX_BOLD | KAX_DIM);
+					break;
+				case 24:
+					kd_attrflags &= ~KAX_UNDERLINE;
+					break;
+				case 25:
+					kd_attrflags &= ~KAX_BLINK;
+					break;
+				case 27:
+					kd_attrflags &= ~KAX_REVERSE;
+					break;
+				case 38:
+					kd_attrflags |= KAX_UNDERLINE;
+					kd_color = (kd_color & 0xf0) | (KA_NORMAL & 0x0f);
+					break;
+				case 39:
+					kd_attrflags &= ~KAX_UNDERLINE;
+					kd_color = (kd_color & 0xf0) | (KA_NORMAL & 0x0f);
+					break;
+				default:
+				  if (number[i] >= 30 && number[i] <= 37) {
+				    /* foreground color */
+				    kd_color = (kd_color & 0xf0) | color_table[(number[i] - 30)];
+				  } else if (number[i] >= 40 && number[i] <= 47) {
+				    /* background color */
+				    kd_color = (kd_color & 0x0f) | (color_table[(number[i] - 40)] << 4);
+				  }
+				  break;
+				}
+			kd_update_kd_attr();
 			esc_spt = esc_seq;
 			break;
-		}
-		if (number[0] == MACH_ATOI_DEFAULT)
-			number[0] = 0;
-		else if (number[0] > 0)
-			--number[0];		/* numbered from 1 */
-		newpos = (number[0] * ONE_LINE);   /* setup row */
-		if (number[1] == MACH_ATOI_DEFAULT)
-			number[1] = 0;
-		else if (number[1] > 0)
-			number[1]--;
-		newpos += (number[1] * ONE_SPACE);	/* setup column */
-		if (newpos < 0)
-			newpos = 0;		/* upper left */
-		if (newpos > ONE_PAGE)
-			newpos = (ONE_PAGE - ONE_SPACE); /* lower right */
-		kd_setpos(newpos);
-		esc_spt = esc_seq;
-		break;				/* done or not ready */
-	case 'J':
-		switch(number[0]) {
-		case MACH_ATOI_DEFAULT:
-		case 0:
-			kd_cltobcur();	/* clears from current
-					   pos to bottom.
-					   */
+		case '@':
+			if (number[0] == MACH_ATOI_DEFAULT)
+				kd_insch(1);
+			else
+				kd_insch(number[0]);
+			esc_spt = esc_seq;
 			break;
-		case 1:
-			kd_cltopcur();	/* clears from top to
-					   current pos.
-					   */
+		case 'A':
+			if (number[0] == MACH_ATOI_DEFAULT)
+				kd_up();
+			else
+				while (number[0]--)
+					kd_up();
+			esc_spt = esc_seq;
 			break;
-		case 2:
-			kd_cls();
+		case 'B':
+			if (number[0] == MACH_ATOI_DEFAULT)
+				kd_down();
+			else
+				while (number[0]--)
+					kd_down();
+			esc_spt = esc_seq;
 			break;
-		default:
+		case 'C':
+			if (number[0] == MACH_ATOI_DEFAULT)
+				kd_right();
+			else
+				while (number[0]--)
+					kd_right();
+			esc_spt = esc_seq;
 			break;
-		}
-		esc_spt = esc_seq;		/* reset it */
-		break;
-	case 'K':
-		switch(number[0]) {
-		case MACH_ATOI_DEFAULT:
-		case 0:
-			kd_cltoecur();	/* clears from current
-					   pos to eoln.
-					   */
+		case 'D':
+			if (number[0] == MACH_ATOI_DEFAULT)
+				kd_left();
+			else
+				while (number[0]--)
+					kd_left();
+			esc_spt = esc_seq;
 			break;
-		case 1:
-			kd_clfrbcur();	/* clears from begin
-					   of line to current
-					   pos.
-					   */
+		case 'E':
+			kd_cr();
+			if (number[0] == MACH_ATOI_DEFAULT)
+				kd_down();
+			else
+				while (number[0]--)
+					kd_down();
+			esc_spt = esc_seq;
 			break;
-		case 2:
-			kd_eraseln();	/* clear entire line */
+		case 'F':
+			kd_cr();
+			if (number[0] == MACH_ATOI_DEFAULT)
+				kd_up();
+			else
+				while (number[0]--)
+					kd_up();
+			esc_spt = esc_seq;
 			break;
-		default:
+		case 'G':
+			if (number[0] == MACH_ATOI_DEFAULT)
+				number[0] = 0;
+			else
+				if (number[0] > 0)
+					--number[0];	/* because number[0] is from 1 */
+			kd_setpos(BEG_OF_LINE(kd_curpos) + number[0] * ONE_SPACE);
+			esc_spt = esc_seq;
 			break;
-		}
-		esc_spt = esc_seq;
-		break;
-	case 'L':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_insln(1);
-		else
-			kd_insln(number[0]);
-		esc_spt = esc_seq;
-		break;
-	case 'M':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_delln(1);
-		else
-			kd_delln(number[0]);
-		esc_spt = esc_seq;
-		break;
-	case 'P':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_delch(1);
-		else
-			kd_delch(number[0]);
-		esc_spt = esc_seq;
-		break;
-	case 'S':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_scrollup();
-		else
-			while (number[0]--)
+		case 'f':
+		case 'H':
+			if (number[0] == MACH_ATOI_DEFAULT && number[1] == MACH_ATOI_DEFAULT)
+			{
+				kd_home();
+				esc_spt = esc_seq;
+				break;
+			}
+			if (number[0] == MACH_ATOI_DEFAULT)
+				number[0] = 0;
+			else if (number[0] > 0)
+				--number[0];		/* numbered from 1 */
+			newpos = (number[0] * ONE_LINE);   /* setup row */
+			if (number[1] == MACH_ATOI_DEFAULT)
+				number[1] = 0;
+			else if (number[1] > 0)
+				number[1]--;
+			newpos += (number[1] * ONE_SPACE);	/* setup column */
+			if (newpos < 0)
+				newpos = 0;		/* upper left */
+			if (newpos > ONE_PAGE)
+				newpos = (ONE_PAGE - ONE_SPACE); /* lower right */
+			kd_setpos(newpos);
+			esc_spt = esc_seq;
+			break;				/* done or not ready */
+		case 'J':
+			switch(number[0]) {
+			case MACH_ATOI_DEFAULT:
+			case 0:
+				kd_cltobcur();	/* clears from current
+						   pos to bottom.
+						   */
+				break;
+			case 1:
+				kd_cltopcur();	/* clears from top to
+						   current pos.
+						   */
+				break;
+			case 2:
+				kd_cls();
+				break;
+			default:
+				break;
+			}
+			esc_spt = esc_seq;		/* reset it */
+			break;
+		case 'K':
+			switch(number[0]) {
+			case MACH_ATOI_DEFAULT:
+			case 0:
+				kd_cltoecur();	/* clears from current
+						   pos to eoln.
+						   */
+				break;
+			case 1:
+				kd_clfrbcur();	/* clears from begin
+						   of line to current
+						   pos.
+						   */
+				break;
+			case 2:
+				kd_eraseln();	/* clear entire line */
+				break;
+			default:
+				break;
+			}
+			esc_spt = esc_seq;
+			break;
+		case 'L':
+			if (number[0] == MACH_ATOI_DEFAULT)
+				kd_insln(1);
+			else
+				kd_insln(number[0]);
+			esc_spt = esc_seq;
+			break;
+		case 'M':
+			if (number[0] == MACH_ATOI_DEFAULT)
+				kd_delln(1);
+			else
+				kd_delln(number[0]);
+			esc_spt = esc_seq;
+			break;
+		case 'P':
+			if (number[0] == MACH_ATOI_DEFAULT)
+				kd_delch(1);
+			else
+				kd_delch(number[0]);
+			esc_spt = esc_seq;
+			break;
+		case 'S':
+			if (number[0] == MACH_ATOI_DEFAULT)
 				kd_scrollup();
-		esc_spt = esc_seq;
-		break;
-	case 'T':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_scrolldn();
-		else
-			while (number[0]--)
+			else
+				while (number[0]--)
+					kd_scrollup();
+			esc_spt = esc_seq;
+			break;
+		case 'T':
+			if (number[0] == MACH_ATOI_DEFAULT)
 				kd_scrolldn();
-		esc_spt = esc_seq;
-		break;
-	case 'X':
-		if (number[0] == MACH_ATOI_DEFAULT)
-			kd_erase(1);
-		else
-			kd_erase(number[0]);
-		esc_spt = esc_seq;
-		break;
-	case '\0':
-		break;			/* not enough yet */
-	default:
-		kd_putc(*cp);		/* show inv character */
-		esc_spt = esc_seq;	/* inv entry, reset */
-		break;
+			else
+				while (number[0]--)
+					kd_scrolldn();
+			esc_spt = esc_seq;
+			break;
+		case 'X':
+			if (number[0] == MACH_ATOI_DEFAULT)
+				kd_erase(1);
+			else
+				kd_erase(number[0]);
+			esc_spt = esc_seq;
+			break;
+		case '\0':
+			break;			/* not enough yet */
+		default:
+			if (*cp >= '@' && *cp <= '~')
+			{
+				/* Unsupported sequence, just silently drop */
+			}
+			else
+			{
+				/* Odd sequence, print it */
+				kd_putc(*cp);	/* show inv character */
+			}
+			esc_spt = esc_seq;	/* inv entry, reset */
+			break;
+		}
 	}
 	return;
 }
@@ -2261,20 +2309,6 @@ kd_getdata(void)
 	return(inb(K_RDWR));
 }
 
-unsigned char
-kd_cmdreg_read(void)
-{
-int ch=KC_CMD_READ;
-
-	while (inb(K_STATUS) & K_IBUF_FUL)
-		;
-	outb(K_CMD, ch);
-
-	while ((inb(K_STATUS) & K_OBUF_FUL) == 0)
-		;
-	return(inb(K_RDWR));
-}
-
 void
 kd_cmdreg_write(int val)
 {
@@ -2479,6 +2513,33 @@ int new_button = 0;
  */
 #define	SLAMBPW	2			/* bytes per word for "slam" fcns */
 
+/*
+ * xga_getpos:
+ *
+ *	This function returns the current hardware cursor position on the
+ *	screen, scaled for compatibility with kd_curpos.
+ *
+ * input	: None
+ * output	: returns the value of cursor position on screen
+ *
+ */
+static csrpos_t
+xga_getpos(void)
+
+{
+	unsigned char	low;
+	unsigned char	high;
+	short pos;
+
+	outb(kd_index_reg, C_HIGH);
+	high = inb(kd_io_reg);
+	outb(kd_index_reg, C_LOW);
+	low = inb(kd_io_reg);
+	pos = (0xff&low) + ((unsigned short)high<<8);
+
+	return(ONE_SPACE * (csrpos_t)pos);
+}
+
 
 /*
  * kd_xga_init:
@@ -2488,9 +2549,12 @@ int new_button = 0;
 void
 kd_xga_init(void)
 {
-	csrpos_t	xga_getpos();
-	unsigned char	screen;
 	unsigned char	start, stop;
+
+#if 0
+	unsigned char	screen;
+
+	/* XXX: this conflicts with read/writing the RTC */
 
 	outb(CMOS_ADDR, CMOS_EB);
 	screen = inb(CMOS_DATA) & CM_SCRMSK;
@@ -2499,6 +2563,7 @@ kd_xga_init(void)
 		printf("kd: unknown screen type, defaulting to EGA\n");
 		/* FALLTHROUGH */
 	case CM_EGA_VGA:
+#endif
 		/*
 		 * Here we'll want to query to bios on the card
 		 * itself, because then we can figure out what
@@ -2522,8 +2587,8 @@ kd_xga_init(void)
 		    for (i = 0; i < 200; i++)
 			addr[i] = 0x00;
 		}
-		break;
 #if 0
+		break;
 	/* XXX: some buggy BIOSes report these...  */
 	case CM_CGA_40:
 		vid_start = (u_char *)phystokv(CGA_START);
@@ -2546,8 +2611,8 @@ kd_xga_init(void)
 		kd_lines = 25;
 		kd_cols = 80;
 		break;
-#endif
 	}
+#endif
 
 	outb(kd_index_reg, C_START);
 	start = inb(kd_io_reg);
@@ -2572,43 +2637,12 @@ kd_xga_init(void)
 
 
 /*
- * xga_getpos:
- *
- *	This function returns the current hardware cursor position on the
- *	screen, scaled for compatibility with kd_curpos.
- *
- * input	: None
- * output	: returns the value of cursor position on screen
- *
- */
-csrpos_t
-xga_getpos(void)
-
-{
-	unsigned char	low;
-	unsigned char	high;
-	short pos;
-
-	outb(kd_index_reg, C_HIGH);
-	high = inb(kd_io_reg);
-	outb(kd_index_reg, C_LOW);
-	low = inb(kd_io_reg);
-	pos = (0xff&low) + ((unsigned short)high<<8);
-
-	return(ONE_SPACE * (csrpos_t)pos);
-}
-
-
-/*
  * charput:
  *
  *	Put attributed character for EGA/CGA/etc.
  */
 static void
-charput(pos, ch, chattr)
-csrpos_t pos;				/* where to put it */
-char	ch;				/* the character */
-char	chattr;				/* its attribute */
+charput(csrpos_t pos, char ch, char chattr)
 {
 	*(vid_start + pos) = ch;
 	*(vid_start + pos + 1) = chattr;
@@ -2621,8 +2655,7 @@ char	chattr;				/* its attribute */
  *	Set hardware cursor position for EGA/CGA/etc.
  */
 static void
-charsetcursor(newpos)
-csrpos_t newpos;
+charsetcursor(csrpos_t newpos)
 {
 	short curpos;		/* position, not scaled for attribute byte */
 
@@ -2642,9 +2675,7 @@ csrpos_t newpos;
  *	Block move up for EGA/CGA/etc.
  */
 static void
-charmvup(from, to, count)
-csrpos_t from, to;
-int count;
+charmvup(csrpos_t from, csrpos_t to, int count)
 {
 	kd_slmscu(vid_start+from, vid_start+to, count);
 }
@@ -2656,9 +2687,7 @@ int count;
  *	Block move down for EGA/CGA/etc.
  */
 static void
-charmvdown(from, to, count)
-csrpos_t from, to;
-int count;
+charmvdown(csrpos_t from, csrpos_t to, int count)
 {
 	kd_slmscd(vid_start+from, vid_start+to, count);
 }
@@ -2670,10 +2699,7 @@ int count;
  *	Fast clear for CGA/EGA/etc.
  */
 static void
-charclear(to, count, chattr)
-csrpos_t to;
-int	count;
-char	chattr;
+charclear(csrpos_t to, int count, char chattr)
 {
 	kd_slmwd(vid_start+to, count, ((unsigned short)chattr<<8)+K_SPACE);
 }
@@ -2723,7 +2749,7 @@ bmpput(
  * bmpcp1char: copy 1 char from one place in the frame buffer to
  * another.
  */
-void
+static void
 bmpcp1char(
 	csrpos_t from, 
 	csrpos_t to)

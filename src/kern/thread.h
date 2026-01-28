@@ -42,7 +42,6 @@
 #include <mach/port.h>
 #include <mach/vm_prot.h>
 #include <kern/ast.h>
-#include <kern/cpu_number.h>
 #include <kern/mach_clock.h>
 #include <kern/queue.h>
 #include <kern/pc_sample.h>
@@ -54,6 +53,12 @@
 #include <kern/task.h>		/* for current_space(), current_map() */
 #include <machine/thread.h>
 #include <ipc/ipc_kmsg_queue.h>
+
+/*
+ * Thread name buffer size. Use the same size as the task so
+ * the thread can inherit the task's name.
+ */
+#define THREAD_NAME_SIZE TASK_NAME_SIZE
 
 struct thread {
 	/* Run queues */
@@ -172,17 +177,17 @@ struct thread {
 	struct ipc_port *ith_sself;	/* a send right */
 	struct ipc_port *ith_exception;	/* a send right */
 
-	mach_port_t ith_mig_reply;	/* reply port for mig */
+	mach_port_name_t ith_mig_reply;	/* reply port for mig */
 	struct ipc_port *ith_rpc_reply;	/* reply port for kernel RPCs */
 
 	/* State saved when thread's stack is discarded */
 	union {
 		struct {
-			mach_msg_header_t *msg;
+			mach_msg_user_header_t *msg;
 			mach_msg_option_t option;
 			mach_msg_size_t rcv_size;
 			mach_msg_timeout_t timeout;
-			mach_port_t notify;
+			mach_port_name_t notify;
 			struct ipc_object *object;
 			struct ipc_mqueue *mqueue;
 		} receive;
@@ -190,7 +195,7 @@ struct thread {
 			struct ipc_port *port;
 			int exc;
 			int code;
-			int subcode;
+			long subcode;
 		} exception;
 		void *other;		/* catch-all for other state */
 	} saved;
@@ -204,11 +209,11 @@ struct thread {
 	unsigned int	sched_delta;	/* weighted cpu usage since update */
 
 	/* Creation time stamp */
-	time_value_t	creation_time;
+	time_value64_t	creation_time;
 
 	/* Time-outs */
-	timer_elt_data_t timer;		/* timer for thread */
-	timer_elt_data_t depress_timer;	/* timer for priority depression */
+	timeout_data_t	timer;		/* timer for thread */
+	timeout_data_t	depress_timer;	/* timer for priority depression */
 
 	/* Ast/Halt data structures */
 	/* Defined above */
@@ -229,7 +234,15 @@ struct thread {
 #if	NCPUS > 1
 	processor_t	last_processor; /* processor this last ran on */
 #endif	/* NCPUS > 1 */
+
+#if	MACH_LOCK_MON
+	unsigned lock_stack;
+#endif
+
+	char	name[THREAD_NAME_SIZE];
 };
+
+#include <kern/cpu_number.h>
 
 /* typedef of thread_t is in kern/kern_types.h */
 typedef struct thread_shuttle	*thread_shuttle_t;
@@ -263,10 +276,6 @@ typedef struct thread *thread_t;
 typedef	mach_port_t *thread_array_t;
 #endif	/* _KERN_KERN_TYPES_H_ */
 
-
-extern thread_t		active_threads[NCPUS];	/* active threads */
-extern vm_offset_t	active_stacks[NCPUS];	/* active kernel stacks */
-
 #ifdef KERNEL
 /*
  *	User routines
@@ -280,8 +289,8 @@ extern kern_return_t	thread_terminate(
 extern kern_return_t	thread_terminate_release(
 	thread_t	thread,
 	task_t		task,
-	mach_port_t	thread_name,
-	mach_port_t	reply_port,
+	mach_port_name_t	thread_name,
+	mach_port_name_t	reply_port,
 	vm_offset_t	address,
 	vm_size_t	size);
 extern kern_return_t	thread_suspend(
@@ -295,6 +304,7 @@ extern void		thread_start(
 	continuation_t	start);
 extern thread_t		kernel_thread(
 	task_t		task,
+	const char *	name,
 	continuation_t	start,
 	void		*arg);
 extern kern_return_t	thread_priority(
@@ -344,6 +354,12 @@ extern kern_return_t	thread_assign(
 extern kern_return_t	thread_assign_default(
 	thread_t	thread);
 extern void		stack_collect(void);
+extern kern_return_t thread_set_name(
+	thread_t	thread,
+	const_kernel_debug_name_t	name);
+extern kern_return_t thread_get_name(
+	thread_t	thread,
+	kernel_debug_name_t	name);
 #endif
 
 /*
@@ -365,6 +381,7 @@ extern void		thread_halt_self(continuation_t);
 extern void		thread_force_terminate(thread_t);
 extern thread_t		kernel_thread(
 	task_t		task,
+	const char *	name,
 	void		(*start)(void),
 	void *		arg);
 
@@ -387,8 +404,22 @@ extern void		thread_unfreeze(
 
 #define thread_pcb(th)		((th)->pcb)
 
-#define thread_lock(th)		simple_lock(&(th)->lock)
-#define thread_unlock(th)	simple_unlock(&(th)->lock)
+/* Shall be taken at splsched only */
+#ifdef MACH_LDEBUG
+#define thread_lock(th)		\
+MACRO_BEGIN \
+	assert_splsched(); \
+	simple_lock_nocheck(&(th)->lock); \
+MACRO_END
+#define thread_unlock(th)	\
+MACRO_BEGIN \
+	assert_splsched(); \
+	simple_unlock_nocheck(&(th)->lock); \
+MACRO_END
+#else
+#define thread_lock(th)		simple_lock_nocheck(&(th)->lock)
+#define thread_unlock(th)	simple_unlock_nocheck(&(th)->lock)
+#endif
 
 #define thread_should_halt(thread)	\
 		((thread)->ast & (AST_HALT|AST_TERMINATE))
@@ -398,10 +429,10 @@ extern void		thread_unfreeze(
  *	designate this by defining CURRENT_THREAD.
  */
 #ifndef	CURRENT_THREAD
-#define current_thread()	(active_threads[cpu_number()])
+#define current_thread()	(percpu_get(thread_t, active_thread))
 #endif	/* CURRENT_THREAD */
 
-#define	current_stack()		(active_stacks[cpu_number()])
+#define	current_stack()		(percpu_get(vm_offset_t, active_stack))
 
 #define	current_task()		(current_thread()->task)
 #define	current_space()		(current_task()->itk_space)
@@ -410,6 +441,7 @@ extern void		thread_unfreeze(
 #if MACH_DEBUG
 void stack_init(vm_offset_t stack);
 void stack_finalize(vm_offset_t stack);
+void thread_stats(void);
 #endif /* MACH_DEBUG */
 
 #endif	/* _KERN_THREAD_H_ */

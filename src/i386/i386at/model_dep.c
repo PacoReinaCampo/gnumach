@@ -32,6 +32,7 @@
  *	Basic initialization for I386 - ISA bus machines.
  */
 
+#include <inttypes.h>
 #include <string.h>
 
 #include <device/cons.h>
@@ -50,15 +51,14 @@
 #include <kern/printf.h>
 #include <kern/startup.h>
 #include <kern/smp.h>
-#include <sys/time.h>
 #include <sys/types.h>
 #include <vm/vm_page.h>
 #include <i386/fpu.h>
 #include <i386/gdt.h>
 #include <i386/ktss.h>
 #include <i386/ldt.h>
-#include <i386/machspl.h>
-#include <i386/pic.h>
+#include <i386/spl.h>
+#include <i386/mp_desc.h>
 #include <i386/pit.h>
 #include <i386/pmap.h>
 #include <i386/proc_reg.h>
@@ -66,6 +66,8 @@
 #include <i386/locore.h>
 #include <i386/model_dep.h>
 #include <i386/smp.h>
+#include <i386/seg.h>
+#include <i386at/acpi_parse_apic.h>
 #include <i386at/autoconf.h>
 #include <i386at/biosmem.h>
 #include <i386at/elf.h>
@@ -73,7 +75,9 @@
 #include <i386at/int_init.h>
 #include <i386at/kd.h>
 #include <i386at/rtc.h>
+#include <i386at/mbinfo.h>
 #include <i386at/model_dep.h>
+#include <machine/irq.h>
 
 #ifdef	MACH_XEN
 #include <xen/console.h>
@@ -92,18 +96,12 @@
 #include <ddb/db_sym.h>
 #include <i386/db_interface.h>
 
-/* a.out symbol table */
-static vm_offset_t kern_sym_start, kern_sym_end;
-
 /* ELF section header */
 static unsigned elf_shdr_num;
 static vm_size_t elf_shdr_size;
 static vm_offset_t elf_shdr_addr;
 static unsigned elf_shdr_shndx;
 
-#else /* MACH_KDB */
-#define kern_sym_start	0
-#define kern_sym_end	0
 #endif /* MACH_KDB */
 
 #define RESERVED_BIOS 0x10000
@@ -121,7 +119,7 @@ unsigned long *pfn_list = (void*) PFN_LIST;
 unsigned long la_shift = VM_MIN_KERNEL_ADDRESS;
 #endif
 #else	/* MACH_XEN */
-struct multiboot_info boot_info;
+struct multiboot_raw_info boot_info;
 #endif	/* MACH_XEN */
 
 /* Command line supplied to kernel.  */
@@ -129,14 +127,14 @@ char *kernel_cmdline = "";
 
 extern char	version[];
 
+/* Realmode temporary GDT */
+extern struct pseudo_descriptor gdt_descr_tmp;
+
+/* Realmode relocated jmp */
+extern uint32_t apboot_jmp_offset;
+
 /* If set, reboot the system on ctrl-alt-delete.  */
 boolean_t	rebootflag = FALSE;	/* exported to kdintr */
-
-/* Interrupt stack.  */
-static char int_stack[KERNEL_STACK_SIZE] __aligned(KERNEL_STACK_SIZE);
-#if NCPUS <= 1
-vm_offset_t int_stack_top[1], int_stack_base[1];
-#endif
 
 #ifdef LINUX_DEV
 extern void linux_init(void);
@@ -147,11 +145,6 @@ extern void linux_init(void);
  */
 void machine_init(void)
 {
-	/*
-	 * Initialize the console.
-	 */
-	cninit();
-
 	/*
 	 * Make more free memory.
 	 *
@@ -168,17 +161,35 @@ void machine_init(void)
 #ifdef MACH_HYP
 	hyp_init();
 #else	/* MACH_HYP */
+#if defined(APIC)
+	int err;
+
+	err = acpi_apic_init();
+	if (err) {
+		printf("acpi_apic_init failed with %d\n", err);
+		for (;;);
+	}
+#endif
+#if (NCPUS > 1)
+	smp_init();
+#endif
+	init_irqs();
+#if defined(APIC)
+	ioapic_configure();
+#endif
+	clkstart();
+
+	/*
+	 * Initialize the console.
+	 */
+	cninit();
+
 #ifdef LINUX_DEV
 	/*
 	 * Initialize Linux drivers.
 	 */
 	linux_init();
 #endif
-
-#if NCPUS > 1
-	smp_init();
-#endif /* NCPUS > 1 */
-
 	/*
 	 * Find the devices
 	 */
@@ -204,6 +215,30 @@ void machine_init(void)
 	 * Note that this breaks accessing some BIOS areas stored there.
 	 */
 	pmap_unmap_page_zero();
+#endif
+
+#if NCPUS > 1
+	/*
+	 * Patch the realmode gdt with the correct offset and the first jmp to
+	 * protected mode with the correct target.
+	 */
+#ifdef __i386__
+	gdt_descr_tmp.linear_base += apboot_addr;
+	apboot_jmp_offset += apboot_addr;
+#endif
+#ifdef __x86_64__
+	/* Section .boot.text is located at a 32 bit offset.
+	 * To access it here, we need to add KERNEL_MAP_BASE to pointers. */
+	*(uint32_t *)phystokv(&gdt_descr_tmp.linear_base) += apboot_addr;
+	*(uint32_t *)phystokv(&apboot_jmp_offset) += apboot_addr;
+#endif
+#endif
+
+#ifdef APIC
+	/*
+	 * Initialize the HPET
+	 */
+	hpet_init();
 #endif
 }
 
@@ -259,11 +294,6 @@ void halt_all_cpus(boolean_t reboot)
 	}
 	while (TRUE)
 	  machine_idle (cpu_number ());
-}
-
-void exit(int rc)
-{
-	halt_all_cpus(0);
 }
 
 void db_halt_cpu(void)
@@ -336,6 +366,8 @@ register_boot_data(const struct multiboot_raw_info *mbi)
 				biosmem_register_boot_data(shdr->addr, shdr->addr + shdr->size, FALSE);
 		}
 	}
+
+	mbinfo_register_boot_data(mbi);
 }
 
 #endif /* MACH_HYP */
@@ -344,18 +376,18 @@ register_boot_data(const struct multiboot_raw_info *mbi)
  * Basic PC VM initialization.
  * Turns on paging and changes the kernel segments to use high linear addresses.
  */
-void
+static void
 i386at_init(void)
 {
-	/* XXX move to intel/pmap.h */
-	extern pt_entry_t *kernel_page_dir;
-	int i;
-
 	/*
 	 * Initialize the PIC prior to any possible call to an spl.
 	 */
 #ifndef	MACH_HYP
+# ifdef APIC
+	picdisable();
+# else
 	picinit();
+# endif
 #else	/* MACH_HYP */
 	hyp_intrinit();
 #endif	/* MACH_HYP */
@@ -388,7 +420,7 @@ i386at_init(void)
 	}
 
 	if (boot_info.flags & MULTIBOOT_MODS && boot_info.mods_count) {
-		struct multiboot_module *m;
+		struct multiboot_raw_module *m;
 		int i;
 
 		if (! init_alloc_aligned(
@@ -432,49 +464,9 @@ i386at_init(void)
 	 */
 	biosmem_setup();
 
-	/*
-	 * We'll have to temporarily install a direct mapping
-	 * between physical memory and low linear memory,
-	 * until we start using our new kernel segment descriptors.
-	 */
-#if INIT_VM_MIN_KERNEL_ADDRESS != LINEAR_MIN_KERNEL_ADDRESS
-	vm_offset_t delta = INIT_VM_MIN_KERNEL_ADDRESS - LINEAR_MIN_KERNEL_ADDRESS;
-	if ((vm_offset_t)(-delta) < delta)
-		delta = (vm_offset_t)(-delta);
-	int nb_direct = delta >> PDESHIFT;
-	for (i = 0; i < nb_direct; i++)
-		kernel_page_dir[lin2pdenum_cont(INIT_VM_MIN_KERNEL_ADDRESS) + i] =
-			kernel_page_dir[lin2pdenum_cont(LINEAR_MIN_KERNEL_ADDRESS) + i];
-#endif
-	/* We need BIOS memory mapped at 0xc0000 & co for Linux drivers */
-#ifdef LINUX_DEV
-#if VM_MIN_KERNEL_ADDRESS != 0
-	kernel_page_dir[lin2pdenum_cont(LINEAR_MIN_KERNEL_ADDRESS - VM_MIN_KERNEL_ADDRESS)] =
-		kernel_page_dir[lin2pdenum_cont(LINEAR_MIN_KERNEL_ADDRESS)];
-#endif
-#endif
+	pmap_make_temporary_mapping();
+	pmap_set_page_dir();
 
-#ifdef	MACH_PV_PAGETABLES
-	for (i = 0; i < PDPNUM; i++)
-		pmap_set_page_readonly_init((void*) kernel_page_dir + i * INTEL_PGBYTES);
-#if PAE
-	pmap_set_page_readonly_init(kernel_pmap->pdpbase);
-#endif	/* PAE */
-#endif	/* MACH_PV_PAGETABLES */
-#if PAE
-#ifdef __x86_64__
-	set_cr3((unsigned long)_kvtophys(kernel_pmap->l4base));
-#else
-	set_cr3((unsigned long)_kvtophys(kernel_pmap->pdpbase));
-#endif
-#ifndef	MACH_HYP
-	if (!CPU_HAS_FEATURE(CPU_FEATURE_PAE))
-		panic("CPU doesn't have support for PAE.");
-	set_cr4(get_cr4() | CR4_PAE);
-#endif	/* MACH_HYP */
-#else
-	set_cr3((unsigned long)_kvtophys(kernel_page_dir));
-#endif	/* PAE */
 #ifndef	MACH_HYP
 	/* Turn paging on.
 	 * Also set the WP bit so that on 486 or better processors
@@ -501,42 +493,22 @@ i386at_init(void)
 	ldt_init();
 	ktss_init();
 
-#if INIT_VM_MIN_KERNEL_ADDRESS != LINEAR_MIN_KERNEL_ADDRESS
-	/* Get rid of the temporary direct mapping and flush it out of the TLB.  */
-	for (i = 0 ; i < nb_direct; i++) {
-#ifdef	MACH_XEN
-#ifdef	MACH_PSEUDO_PHYS
-		if (!hyp_mmu_update_pte(kv_to_ma(&kernel_page_dir[lin2pdenum_cont(VM_MIN_KERNEL_ADDRESS) + i]), 0))
-#else	/* MACH_PSEUDO_PHYS */
-		if (hyp_do_update_va_mapping(VM_MIN_KERNEL_ADDRESS + i * INTEL_PGBYTES, 0, UVMF_INVLPG | UVMF_ALL))
-#endif	/* MACH_PSEUDO_PHYS */
-			printf("couldn't unmap frame %d\n", i);
-#else	/* MACH_XEN */
-		kernel_page_dir[lin2pdenum_cont(INIT_VM_MIN_KERNEL_ADDRESS) + i] = 0;
-#endif	/* MACH_XEN */
-	}
+#ifndef MACH_XEN
+	init_percpu(0);
 #endif
-	/* Keep BIOS memory mapped */
-#ifdef LINUX_DEV
-#if VM_MIN_KERNEL_ADDRESS != 0
-	kernel_page_dir[lin2pdenum_cont(LINEAR_MIN_KERNEL_ADDRESS - VM_MIN_KERNEL_ADDRESS)] =
-		kernel_page_dir[lin2pdenum_cont(LINEAR_MIN_KERNEL_ADDRESS)];
-#endif
-#endif
+#if NCPUS > 1
+	/* Initialize SMP structures in the master processor */
+	mp_desc_init(0);
+#endif // NCPUS
 
-	/* Not used after boot, better give it back.  */
-#ifdef	MACH_XEN
-	hyp_free_page(0, (void*) VM_MIN_KERNEL_ADDRESS);
-#endif	/* MACH_XEN */
-
-	flush_tlb();
+	pmap_remove_temporary_mapping();
 
 #ifdef	MACH_XEN
 	hyp_p2m_init();
 #endif	/* MACH_XEN */
 
-	int_stack_base[0] = (vm_offset_t)&int_stack;
-	int_stack_top[0] = int_stack_base[0] + KERNEL_STACK_SIZE - 4;
+	interrupt_stack_alloc();
+	spl_init = 1;
 }
 
 /*
@@ -574,30 +546,15 @@ void c_boot_entry(vm_offset_t bi)
 	 * We need to do this before i386at_init()
 	 * so that the symbol table's memory won't be stomped on.
 	 */
-	if ((boot_info.flags & MULTIBOOT_AOUT_SYMS)
-	    && boot_info.syms.a.addr)
-	{
-		vm_size_t symtab_size, strtab_size;
-
-		kern_sym_start = (vm_offset_t)phystokv(boot_info.syms.a.addr);
-		symtab_size = (vm_offset_t)phystokv(boot_info.syms.a.tabsize);
-		strtab_size = (vm_offset_t)phystokv(boot_info.syms.a.strsize);
-		kern_sym_end = kern_sym_start + 4 + symtab_size + strtab_size;
-
-		printf("kernel symbol table at %08lx-%08lx (%ld,%ld)\n",
-		       kern_sym_start, kern_sym_end,
-		       (unsigned long) symtab_size, (unsigned long) strtab_size);
-	}
-
 	if ((boot_info.flags & MULTIBOOT_ELF_SHDR)
-	    && boot_info.syms.e.num)
+	    && boot_info.shdr_num)
 	{
-		elf_shdr_num = boot_info.syms.e.num;
-		elf_shdr_size = boot_info.syms.e.size;
-		elf_shdr_addr = (vm_offset_t)phystokv(boot_info.syms.e.addr);
-		elf_shdr_shndx = boot_info.syms.e.shndx;
+		elf_shdr_num = boot_info.shdr_num;
+		elf_shdr_size = boot_info.shdr_size;
+		elf_shdr_addr = (vm_offset_t)phystokv(boot_info.shdr_addr);
+		elf_shdr_shndx = boot_info.shdr_strndx;
 
-		printf("ELF section header table at %08lx\n", elf_shdr_addr);
+		printf("ELF section header table at %08" PRIxPTR "\n", elf_shdr_addr);
 	}
 #endif	/* MACH_KDB */
 #endif	/* MACH_XEN */
@@ -613,11 +570,6 @@ void c_boot_entry(vm_offset_t bi)
 	/*
 	 * Initialize the kernel debugger's kernel symbol table.
 	 */
-	if (kern_sym_start)
-	{
-		aout_db_sym_init((char *)kern_sym_start, (char *)kern_sym_end, "mach", (char *)0);
-	}
-
 	if (elf_shdr_num)
 	{
 		elf_db_sym_init(elf_shdr_num,elf_shdr_size,
@@ -627,9 +579,11 @@ void c_boot_entry(vm_offset_t bi)
 #endif	/* MACH_KDB */
 
 	machine_slot[0].is_cpu = TRUE;
-	machine_slot[0].running = TRUE;
 	machine_slot[0].cpu_subtype = CPU_SUBTYPE_AT386;
 
+#if defined(__x86_64__) && !defined(USER32)
+	machine_slot[0].cpu_type = CPU_TYPE_X86_64;
+#else
 	switch (cpu_type)
 	  {
 	  default:
@@ -648,6 +602,7 @@ void c_boot_entry(vm_offset_t bi)
 	    machine_slot[0].cpu_type = CPU_TYPE_PENTIUMPRO;
 	    break;
 	  }
+#endif
 
 	/*
 	 * Start the system.
@@ -661,10 +616,7 @@ void c_boot_entry(vm_offset_t bi)
 #include <mach/time_value.h>
 
 vm_offset_t
-timemmap(dev, off, prot)
-	dev_t dev;
-	vm_offset_t off;
-	vm_prot_t prot;
+timemmap(dev_t dev, vm_offset_t off, vm_prot_t prot)
 {
 	extern time_value_t *mtime;
 
@@ -676,18 +628,29 @@ timemmap(dev, off, prot)
 void
 startrtclock(void)
 {
+#ifdef APIC
+	unmask_irq(timer_pin);
+	calibrate_lapic_timer();
+	if (cpu_number() != 0) {
+		lapic_enable_timer();
+	}
+#else
 	clkstart();
+#ifndef MACH_HYP
+	unmask_irq(0);
+#endif
+#endif
 }
 
 void
 inittodr(void)
 {
-	time_value_t	new_time;
+	time_value64_t	new_time;
 	uint64_t	newsecs;
 
 	(void) readtodc(&newsecs);
 	new_time.seconds = newsecs;
-	new_time.microseconds = 0;
+	new_time.nanoseconds = 0;
 
 	{
 	    spl_t	s = splhigh();

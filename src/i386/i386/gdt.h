@@ -77,11 +77,11 @@
 
 /*			0x58		   used by user TSS in 64bit mode */
 
-#ifdef __x86_64__
-#define	GDTSZ		sel_idx(0x60)
-#else
-#define	GDTSZ		sel_idx(0x58)
-#endif
+#define PERCPU_DS	0x68		/* per-cpu data mapping */
+
+#define	GDTSZ		sel_idx(0x70)
+
+#ifndef __ASSEMBLER__
 
 extern struct real_descriptor gdt[GDTSZ];
 
@@ -115,5 +115,7 @@ extern struct real_descriptor gdt[GDTSZ];
 #endif
 
 extern void gdt_init(void);
+extern void ap_gdt_init(int cpu);
 
+#endif /* __ASSEMBLER__ */
 #endif /* _I386_GDT_ */

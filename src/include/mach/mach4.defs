@@ -41,10 +41,16 @@ subsystem
 
 
 #ifdef MACH_PCSAMPLE
-type sampled_pc_t 	= struct[3]    of natural_t;
+type sampled_pc_flavor_t = unsigned;
+
+type sampled_pc_t 	= struct {
+   rpc_vm_offset_t id;
+   rpc_vm_offset_t pc;
+   sampled_pc_flavor_t sampletype;
+};
+
 type sampled_pc_array_t = array[*:512] of sampled_pc_t;
 type sampled_pc_seqno_t = unsigned;
-type sampled_pc_flavor_t = natural_t;
 
 routine task_enable_pc_sampling(
 		host          : task_t;
@@ -98,15 +104,28 @@ skip	/* pc_sampling reserved 4*/;
 
 
 /* Create a new proxy memory object from [START;START+LEN) in the
-   given OBJECT at OFFSET in the new object with the maximum
+   given memory object OBJECT at OFFSET in the new object with the maximum
    protection MAX_PROTECTION and return it in *PORT.  */
 type vm_offset_array_t = array[*:1024] of vm_offset_t;
+type vm_size_array_t = array[*:1024] of vm_size_t;
+type rpc_vm_size_array_t = array[*:1024] of rpc_vm_size_t;
+type rpc_vm_offset_array_t = array[*:1024] of rpc_vm_offset_t;
 routine memory_object_create_proxy(
 		task		: ipc_space_t;
 		max_protection	: vm_prot_t;
 		object		: memory_object_array_t =
-				  array[*:1024] of memory_object_t;
-		offset		: vm_offset_array_t;
-		start		: vm_offset_array_t;
-		len		: vm_offset_array_t;
+				  array[*:1024] of mach_port_send_t;
+		offset		: rpc_vm_offset_array_t;
+		start		: rpc_vm_offset_array_t;
+		len		: rpc_vm_size_array_t;
+		out proxy	: mach_port_t);
+
+/* Gets a proxy to the region that ADDRESS belongs to, starting at the region
+   start, with MAX_PROTECTION and LEN limited by the region ones, and returns
+   it in *PORT.  */
+routine vm_region_create_proxy(
+		task		: task_t;
+		address		: vm_address_t;
+		max_protection	: vm_prot_t;
+		len		: vm_size_t;
 		out proxy	: mach_port_t);

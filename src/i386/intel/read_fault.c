@@ -30,9 +30,11 @@
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/pmap.h>
+#include <intel/read_fault.h>
 
 #include <kern/macros.h>
 
+#if (__i386__ && !(__i486__ || __i586__ || __i686__))
 /*
  *	Expansion of vm_fault for read fault in kernel mode.
  *	Must enter the mapping as writable, since the i386
@@ -60,7 +62,7 @@ intel_read_fault(
 	 *	Find the backing store object and offset into it
 	 *	to begin search.
 	 */
-	result = vm_map_lookup(&map, vaddr, VM_PROT_READ, &version,
+	result = vm_map_lookup(&map, vaddr, VM_PROT_READ, FALSE, &version,
 			&object, &offset, &prot, &wired);
 	if (result != KERN_SUCCESS)
 	    return (result);
@@ -132,7 +134,7 @@ intel_read_fault(
 	    vm_offset_t		retry_offset;
 	    vm_prot_t		retry_prot;
 
-	    result = vm_map_lookup(&map, vaddr, VM_PROT_READ, &version,
+	    result = vm_map_lookup(&map, vaddr, VM_PROT_READ, FALSE, &version,
 				&retry_object, &retry_offset, &retry_prot,
 				&wired);
 	    if (result != KERN_SUCCESS) {
@@ -174,3 +176,4 @@ intel_read_fault(
 
 	return (KERN_SUCCESS);
 }
+#endif

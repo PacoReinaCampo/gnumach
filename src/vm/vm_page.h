@@ -79,9 +79,6 @@
 
 struct vm_page {
 	struct list node;		/* page queues or free list (P) */
-	unsigned short type;
-	unsigned short seg_index;
-	unsigned short order;
 	void *priv;
 
 	/*
@@ -95,7 +92,6 @@ struct vm_page {
 
 	/* We use an empty struct as the delimiter.  */
 	struct {} vm_page_header;
-#define VM_PAGE_HEADER_SIZE	offsetof(struct vm_page, vm_page_header)
 
 	vm_object_t	object;		/* which object am I in (O,P) */
 	vm_offset_t	offset;		/* offset into that object (O,P) */
@@ -126,9 +122,19 @@ struct vm_page {
 					 * without having data. (O)
 					 * [See vm_object_overwrite] */
 
-	vm_prot_t	page_lock;	/* Uses prohibited by data manager (O) */
-	vm_prot_t	unlock_request;	/* Outstanding unlock request (O) */
+	vm_prot_t	page_lock:3;	/* Uses prohibited by data manager (O) */
+	vm_prot_t	unlock_request:3;	/* Outstanding unlock request (O) */
+
+	struct {} vm_page_footer;
+
+	unsigned short type:2;
+	unsigned short seg_index:2;
+	unsigned short order:4;
 };
+
+#define VM_PAGE_BODY_SIZE					\
+		(offsetof(struct vm_page, vm_page_footer)	\
+		- offsetof(struct vm_page, vm_page_header))
 
 /*
  *	For debugging, this macro can be defined to perform
@@ -154,6 +160,16 @@ void vm_page_check(const struct vm_page *page);
  *		at least one physical map.  This list is
  *		ordered, in LRU-like fashion.
  */
+
+#define VM_PAGE_DMA		0x01
+#if defined(VM_PAGE_DMA32_LIMIT) && VM_PAGE_DMA32_LIMIT > VM_PAGE_DIRECTMAP_LIMIT
+#define VM_PAGE_DIRECTMAP      0x02
+#define VM_PAGE_DMA32          0x04
+#else
+#define VM_PAGE_DMA32		0x02
+#define VM_PAGE_DIRECTMAP	0x04
+#endif
+#define VM_PAGE_HIGHMEM		0x08
 
 extern
 int	vm_page_fictitious_count;/* How many fictitious pages are free? */
@@ -187,7 +203,7 @@ extern vm_page_t	vm_page_lookup(
 extern vm_page_t	vm_page_grab_fictitious(void);
 extern boolean_t	vm_page_convert(vm_page_t *);
 extern void		vm_page_more_fictitious(void);
-extern vm_page_t	vm_page_grab(void);
+extern vm_page_t	vm_page_grab(unsigned flags);
 extern void		vm_page_release(vm_page_t, boolean_t, boolean_t);
 extern phys_addr_t	vm_page_grab_phys_addr(void);
 extern vm_page_t	vm_page_grab_contig(vm_size_t, unsigned int);
@@ -277,6 +293,7 @@ extern unsigned int	vm_page_info(
 
 #define vm_page_lock_queues()	simple_lock(&vm_page_queue_lock)
 #define vm_page_unlock_queues()	simple_unlock(&vm_page_queue_lock)
+#define vm_page_locked_queues()	simple_lock_taken(&vm_page_queue_lock)
 
 #define VM_PAGE_QUEUES_REMOVE(mem) vm_page_queues_remove(mem)
 
@@ -316,13 +333,24 @@ extern unsigned int	vm_page_info(
  *
  * Selector-to-segment-list translation table :
  * DMA          DMA
+ * if 32bit PAE
+ * DIRECTMAP    DMA32 DMA
+ * DMA32        DMA32 DIRECTMAP DMA
+ * HIGHMEM      HIGHMEM DMA32 DIRECTMAP DMA
+ * else
  * DMA32        DMA32 DMA
  * DIRECTMAP    DIRECTMAP DMA32 DMA
  * HIGHMEM      HIGHMEM DIRECTMAP DMA32 DMA
+ * endif
  */
 #define VM_PAGE_SEL_DMA         0
+#if defined(VM_PAGE_DMA32_LIMIT) && VM_PAGE_DMA32_LIMIT > VM_PAGE_DIRECTMAP_LIMIT
+#define VM_PAGE_SEL_DIRECTMAP   1
+#define VM_PAGE_SEL_DMA32       2
+#else
 #define VM_PAGE_SEL_DMA32       1
 #define VM_PAGE_SEL_DIRECTMAP   2
+#endif
 #define VM_PAGE_SEL_HIGHMEM     3
 
 /*
@@ -399,7 +427,7 @@ int vm_page_ready(void);
  * pmap_steal_memory. It can be used after physical segments have been loaded
  * and before the vm_page module is initialized.
  */
-unsigned long vm_page_bootalloc(size_t size);
+phys_addr_t vm_page_bootalloc(size_t size);
 
 /*
  * Set up the vm_page module.
@@ -531,5 +559,10 @@ boolean_t vm_page_evict(boolean_t *should_wait);
  * frequent refills.
  */
 void vm_page_refill_inactive(void);
+
+/*
+ * Print vmstat information
+ */
+void db_show_vmstat(void);
 
 #endif	/* _VM_VM_PAGE_H_ */

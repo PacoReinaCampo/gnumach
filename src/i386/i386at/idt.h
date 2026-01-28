@@ -24,18 +24,30 @@
 #ifndef _I386AT_IDT_
 #define _I386AT_IDT_
 
-/* On a standard PC, we only need 16 interrupt vectors,
-   because that's all the PIC hardware supports.  */
-/* XX But for some reason we program the PIC
-   to use vectors 0x40-0x4f rather than 0x20-0x2f.  Fix.  */
-#define IDTSZ (0x20+0x20+0x10)
+/* There are 256 interrupt vectors on x86,
+ * the first 32 are taken by cpu faults */
+#define IDTSZ (0x100)
 
-#define PIC_INT_BASE 0x40
+/* PIC sits at 0x20-0x2f */
+#define PIC_INT_BASE 0x20
+
+/* IOAPIC sits at 0x30-0x47 */
+#define IOAPIC_INT_BASE 0x30
+
+/* IOAPIC spurious interrupt vector set to 0xff */
+#define IOAPIC_SPURIOUS_BASE 0xff
+
+/* Remote -> local AST requests */
+#define CALL_AST_CHECK 0xfa
+
+/* Currently for TLB shootdowns */
+#define CALL_PMAP_UPDATE 0xfb
 
 #include <i386/idt-gen.h>
 
 #ifndef __ASSEMBLER__
 extern void idt_init (void);
+extern void ap_idt_init (int cpu);
 #endif /* __ASSEMBLER__ */
 
 #endif /* _I386AT_IDT_ */

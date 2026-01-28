@@ -29,6 +29,7 @@
 #include <i386/proc_reg.h>
 #include <i386/i386asm.h>
 #include <i386/cpu_number.h>
+#include <i386/gdt.h>
 
 /*
  * Context switch routines for i386.
@@ -40,7 +41,7 @@ ENTRY(Load_context)
 	lea	KERNEL_STACK_SIZE-IKS_SIZE-IEL_SIZE(%ecx),%edx
 						/* point to stack top */
 	CPU_NUMBER(%eax)
-	movl	%ecx,CX(EXT(active_stacks),%eax)	/* store stack address */
+	movl	%ecx,MY(ACTIVE_STACK)		/* store stack address */
 	movl	%edx,CX(EXT(kernel_stack),%eax)	/* store stack top */
 
 	movl	KSS_ESP(%ecx),%esp		/* switch stacks */
@@ -57,8 +58,7 @@ ENTRY(Load_context)
  */
 
 ENTRY(Switch_context)
-	CPU_NUMBER(%edx)
-	movl	CX(EXT(active_stacks),%edx),%ecx	/* get old kernel stack */
+	movl	MY(ACTIVE_STACK),%ecx		/* get old kernel stack */
 
 	movl	%ebx,KSS_EBX(%ecx)		/* save registers */
 	movl	%ebp,KSS_EBP(%ecx)
@@ -78,8 +78,9 @@ ENTRY(Switch_context)
 	lea	KERNEL_STACK_SIZE-IKS_SIZE-IEL_SIZE(%ecx),%ebx
 						/* point to stack top */
 
-	movl	%esi,CX(EXT(active_threads),%edx)	/* new thread is active */
-	movl	%ecx,CX(EXT(active_stacks),%edx)	/* set current stack */
+	CPU_NUMBER(%edx)
+	movl	%esi,MY(ACTIVE_THREAD)		/* new thread is active */
+	movl	%ecx,MY(ACTIVE_STACK)		/* set current stack */
 	movl	%ebx,CX(EXT(kernel_stack),%edx)	/* set stack top */
 
 	movl	KSS_ESP(%ecx),%esp		/* switch stacks */
@@ -109,8 +110,7 @@ ENTRY(Thread_continue)
  * has no FPU state)
  */
 ENTRY(switch_to_shutdown_context)
-	CPU_NUMBER(%edx)
-	movl	EXT(active_stacks)(,%edx,4),%ecx	/* get old kernel stack */
+	movl	MY(ACTIVE_STACK),%ecx		/* get old kernel stack */
 	movl	%ebx,KSS_EBX(%ecx)		/* save registers */
 	movl	%ebp,KSS_EBP(%ecx)
 	movl	%edi,KSS_EDI(%ecx)
@@ -124,8 +124,9 @@ ENTRY(switch_to_shutdown_context)
 	movl	4(%esp),%ebx			/* get routine to run next */
 	movl	8(%esp),%esi			/* get its argument */
 
-	movl	EXT(interrupt_stack)(,%edx,4),%ecx	/* point to its interrupt stack */
-	lea	INTSTACK_SIZE(%ecx),%esp	/* switch to it (top) */
+	CPU_NUMBER(%edx)
+	movl	CX(EXT(int_stack_base),%edx),%ecx	/* point to its interrupt stack */
+	lea	-4+INTSTACK_SIZE(%ecx),%esp	/* switch to it (top) */
 
 	pushl	%eax				/* push thread */
 	call	EXT(thread_dispatch)		/* reschedule thread */

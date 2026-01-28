@@ -74,16 +74,13 @@ typedef phys_addr_t pt_entry_t;
 #ifdef __x86_64__
 #define L4SHIFT		39	/* L4 shift */
 #define L4MASK		0x1ff	/* mask for L4 index */
-#endif
-#define PDPSHIFT	30	/* page directory pointer */
-#ifdef __x86_64__
-/* Enough for 8GiB addressing space. */
-#define PDPNUM		8	/* number of page directory pointers */
+#define PDPNUM_KERNEL	(((VM_MAX_KERNEL_ADDRESS - VM_MIN_KERNEL_ADDRESS) >> PDPSHIFT) + 1)
 #define PDPMASK		0x1ff	/* mask for page directory pointer index */
-#else
+#else /* __x86_64__ */
 #define PDPNUM		4	/* number of page directory pointers */
 #define PDPMASK		3	/* mask for page directory pointer index */
-#endif
+#endif /* __x86_64__ */
+#define PDPSHIFT	30	/* page directory pointer */
 #define PDESHIFT	21	/* page descriptor shift */
 #define PDEMASK		0x1ff	/* mask for page descriptor index */
 #define PTESHIFT	12	/* page table shift */
@@ -111,7 +108,11 @@ typedef phys_addr_t pt_entry_t;
 #if PAE
 /* Special version assuming contiguous page directories.  Making it
    include the page directory pointer table index too.  */
+#ifdef __x86_64__
+#define lin2pdenum_cont(a)	(((a) >> PDESHIFT) & 0x3ff)
+#else
 #define lin2pdenum_cont(a)	(((a) >> PDESHIFT) & 0x7ff)
+#endif
 #else
 #define lin2pdenum_cont(a)	lin2pdenum(a)
 #endif
@@ -127,6 +128,26 @@ typedef phys_addr_t pt_entry_t;
  *	Convert page descriptor index to linear address
  */
 #define pdenum2lin(a)	((vm_offset_t)(a) << PDESHIFT)
+
+#if PAE
+#ifdef __x86_64__
+#define pagenum2lin(l4num, l3num, l2num, l1num) \
+    (((vm_offset_t)(l4num) << L4SHIFT) +        \
+     ((vm_offset_t)(l3num) << PDPSHIFT) +       \
+     ((vm_offset_t)(l2num) << PDESHIFT) +       \
+     ((vm_offset_t)(l1num) << PTESHIFT))
+#else /* __x86_64__ */
+#define pagenum2lin(l4num, l3num, l2num, l1num) \
+    (((vm_offset_t)(l3num) << PDPSHIFT) +       \
+     ((vm_offset_t)(l2num) << PDESHIFT) +       \
+     ((vm_offset_t)(l1num) << PTESHIFT))
+#endif
+#else /* PAE */
+#define pagenum2lin(l4num, l3num, l2num, l1num) \
+    (((vm_offset_t)(l2num) << PDESHIFT) +       \
+     ((vm_offset_t)(l1num) << PTESHIFT))
+#endif
+
 
 /*
  *	Convert linear offset to page table index
@@ -148,6 +169,7 @@ typedef phys_addr_t pt_entry_t;
 #define INTEL_PTE_NCACHE 	0x00000010
 #define INTEL_PTE_REF		0x00000020
 #define INTEL_PTE_MOD		0x00000040
+#define INTEL_PTE_PS		0x00000080
 #ifdef	MACH_PV_PAGETABLES
 /* Not supported */
 #define INTEL_PTE_GLOBAL	0x00000000
@@ -156,7 +178,11 @@ typedef phys_addr_t pt_entry_t;
 #endif	/* MACH_PV_PAGETABLES */
 #define INTEL_PTE_WIRED		0x00000200
 #ifdef PAE
+#ifdef __x86_64__
+#define INTEL_PTE_PFN		0xfffffffffffff000ULL
+#else /* __x86_64__ */
 #define INTEL_PTE_PFN		0x00007ffffffff000ULL
+#endif/* __x86_64__ */
 #else
 #define INTEL_PTE_PFN		0xfffff000
 #endif
@@ -181,16 +207,17 @@ typedef	volatile long	cpu_set;	/* set of CPUs - must be <= 32 */
 struct pmap {
 #if ! PAE
 	pt_entry_t	*dirbase;	/* page directory table */
-#else
-	pt_entry_t	*pdpbase;	/* page directory pointer table */
-#endif	/* ! PAE */
+#else	/* PAE */
 #ifdef __x86_64__
 	pt_entry_t	*l4base;	/* l4 table */
 #ifdef MACH_HYP
 	pt_entry_t	*user_l4base;	/* Userland l4 table */
 	pt_entry_t	*user_pdpbase;	/* Userland l4 table */
 #endif	/* MACH_HYP */
+#else	/* x86_64 */
+	pt_entry_t	*pdpbase;	/* page directory pointer table */
 #endif	/* x86_64 */
+#endif	/* PAE */
 	int		ref_count;	/* reference count */
 	decl_simple_lock_data(,lock)
 					/* lock on map */
@@ -212,6 +239,7 @@ extern void pmap_clear_bootstrap_pagetable(pt_entry_t *addr);
 
 #if PAE
 #ifdef __x86_64__
+/* TODO: support PCID */
 #ifdef MACH_HYP
 #define	set_pmap(pmap)	\
 	MACRO_BEGIN					\
@@ -238,7 +266,7 @@ typedef struct {
 extern pmap_mapwindow_t *pmap_get_mapwindow(pt_entry_t entry);
 extern void pmap_put_mapwindow(pmap_mapwindow_t *map);
 
-#define PMAP_NMAPWINDOWS 2
+#define PMAP_NMAPWINDOWS 2	/* Per CPU */
 
 #if	NCPUS > 1
 /*
@@ -266,10 +294,11 @@ boolean_t	cpu_update_needed[NCPUS];
  */
 
 void		process_pmap_updates(pmap_t);
-void		pmap_update_interrupt(void);
 extern	pmap_t	kernel_pmap;
 
 #endif	/* NCPUS > 1 */
+
+void		pmap_update_interrupt(void);
 
 /*
  *	Machine dependent routines that are used only for i386/i486.
@@ -288,7 +317,8 @@ pt_entry_t *pmap_pte(const pmap_t pmap, vm_offset_t addr);
  *	fields to control TLB invalidation on other CPUS.
  */
 
-#define	PMAP_ACTIVATE_KERNEL(my_cpu)	{				\
+#define	PMAP_ACTIVATE_KERNEL(my_cpu)					\
+MACRO_BEGIN 								\
 									\
 	/*								\
 	 *	Let pmap updates proceed while we wait for this pmap.	\
@@ -319,17 +349,19 @@ pt_entry_t *pmap_pte(const pmap_t pmap, vm_offset_t addr);
 	i_bit_set((my_cpu), &cpus_active);				\
 									\
 	simple_unlock(&kernel_pmap->lock);				\
-}
+MACRO_END
 
-#define	PMAP_DEACTIVATE_KERNEL(my_cpu)	{				\
+#define	PMAP_DEACTIVATE_KERNEL(my_cpu)					\
+MACRO_BEGIN								\
 	/*								\
 	 *	Mark pmap no longer in use by this cpu even if		\
 	 *	pmap is locked against updates.				\
 	 */								\
 	i_bit_clear((my_cpu), &kernel_pmap->cpus_using);		\
-}
+MACRO_END
 
-#define PMAP_ACTIVATE_USER(pmap, th, my_cpu)	{			\
+#define PMAP_ACTIVATE_USER(pmap, th, my_cpu)				\
+MACRO_BEGIN								\
 	pmap_t		tpmap = (pmap);					\
 									\
 	if (tpmap == kernel_pmap) {					\
@@ -369,9 +401,10 @@ pt_entry_t *pmap_pte(const pmap_t pmap, vm_offset_t addr);
 									\
 	    simple_unlock(&tpmap->lock);				\
 	}								\
-}
+MACRO_END
 
-#define PMAP_DEACTIVATE_USER(pmap, thread, my_cpu)	{		\
+#define PMAP_DEACTIVATE_USER(pmap, thread, my_cpu)			\
+MACRO_BEGIN								\
 	pmap_t		tpmap = (pmap);					\
 									\
 	/*								\
@@ -384,9 +417,10 @@ pt_entry_t *pmap_pte(const pmap_t pmap, vm_offset_t addr);
 	     */								\
 	    i_bit_clear((my_cpu), &(pmap)->cpus_using);			\
 	}								\
-}
+MACRO_END
 
-#define MARK_CPU_IDLE(my_cpu)	{					\
+#define MARK_CPU_IDLE(my_cpu)						\
+MACRO_BEGIN								\
 	/*								\
 	 *	Mark this cpu idle, and remove it from the active set,	\
 	 *	since it is not actively using any pmap.  Signal_cpus	\
@@ -398,9 +432,10 @@ pt_entry_t *pmap_pte(const pmap_t pmap, vm_offset_t addr);
 	i_bit_set((my_cpu), &cpus_idle);				\
 	i_bit_clear((my_cpu), &cpus_active);				\
 	splx(s);							\
-}
+MACRO_END
 
-#define MARK_CPU_ACTIVE(my_cpu)	{					\
+#define MARK_CPU_ACTIVE(my_cpu)						\
+MACRO_BEGIN								\
 									\
 	int	s = splvm();						\
 	/*								\
@@ -414,6 +449,7 @@ pt_entry_t *pmap_pte(const pmap_t pmap, vm_offset_t addr);
 	 *	interrupt if this happens.				\
 	 */								\
 	i_bit_clear((my_cpu), &cpus_idle);				\
+	__sync_synchronize();						\
 									\
 	if (cpu_update_needed[(my_cpu)])				\
 	    pmap_update_interrupt();					\
@@ -423,7 +459,7 @@ pt_entry_t *pmap_pte(const pmap_t pmap, vm_offset_t addr);
 	 */								\
 	i_bit_set((my_cpu), &cpus_active);				\
 	splx(s);							\
-}
+MACRO_END
 
 #else	/* NCPUS > 1 */
 
@@ -432,17 +468,20 @@ pt_entry_t *pmap_pte(const pmap_t pmap, vm_offset_t addr);
  *	in use.
  */
 
-#define	PMAP_ACTIVATE_KERNEL(my_cpu)	{				\
+#define	PMAP_ACTIVATE_KERNEL(my_cpu)					\
+MACRO_BEGIN								\
 	(void) (my_cpu);						\
 	kernel_pmap->cpus_using = TRUE;					\
-}
+MACRO_END
 
-#define	PMAP_DEACTIVATE_KERNEL(my_cpu)	{				\
+#define	PMAP_DEACTIVATE_KERNEL(my_cpu)					\
+MACRO_BEGIN\								\
 	(void) (my_cpu);						\
 	kernel_pmap->cpus_using = FALSE;				\
-}
+MACRO_END
 
-#define	PMAP_ACTIVATE_USER(pmap, th, my_cpu)	{			\
+#define	PMAP_ACTIVATE_USER(pmap, th, my_cpu)				\
+MACRO_BEGIN								\
 	pmap_t		tpmap = (pmap);					\
 	(void) (th);							\
 	(void) (my_cpu);						\
@@ -451,14 +490,15 @@ pt_entry_t *pmap_pte(const pmap_t pmap, vm_offset_t addr);
 	if (tpmap != kernel_pmap) {					\
 	    tpmap->cpus_using = TRUE;					\
 	}								\
-}
+MACRO_END
 
-#define PMAP_DEACTIVATE_USER(pmap, thread, cpu)	{			\
+#define PMAP_DEACTIVATE_USER(pmap, thread, cpu)				\
+MACRO_BEGIN								\
 	(void) (thread);						\
 	(void) (cpu);							\
 	if ((pmap) != kernel_pmap)					\
 	    (pmap)->cpus_using = FALSE;					\
-}
+MACRO_END
 
 #endif	/* NCPUS > 1 */
 
@@ -466,11 +506,16 @@ pt_entry_t *pmap_pte(const pmap_t pmap, vm_offset_t addr);
 
 #define	pmap_kernel()			(kernel_pmap)
 #define pmap_resident_count(pmap)	((pmap)->stats.resident_count)
-#define pmap_phys_address(frame)	((vm_offset_t) (intel_ptob(frame)))
+#define pmap_phys_address(frame)	((intel_ptob((phys_addr_t) frame)))
 #define pmap_phys_to_frame(phys)	((int) (intel_btop(phys)))
 #define	pmap_copy(dst_pmap,src_pmap,dst_addr,len,src_addr)
 #define	pmap_attribute(pmap,addr,size,attr,value) \
 					(KERN_INVALID_ADDRESS)
+
+extern pt_entry_t *kernel_page_dir;
+
+extern vm_offset_t kernel_virtual_start;
+extern vm_offset_t kernel_virtual_end;
 
 /*
  *  Bootstrap the system enough to run with virtual memory.
@@ -479,6 +524,10 @@ pt_entry_t *pmap_pte(const pmap_t pmap, vm_offset_t addr);
  *  Called with mapping off.
  */
 extern void pmap_bootstrap(void);
+
+extern void pmap_set_page_dir(void);
+extern void pmap_make_temporary_mapping(void);
+extern void pmap_remove_temporary_mapping(void);
 
 extern void pmap_unmap_page_zero (void);
 
@@ -491,6 +540,29 @@ extern void pmap_zero_page (phys_addr_t);
  *  pmap_copy_page copies the specified (machine independent) pages.
  */
 extern void pmap_copy_page (phys_addr_t, phys_addr_t);
+
+/*
+ *	copy_to_phys(src_addr_v, dst_addr_p, count)
+ *
+ *	Copy virtual memory to physical memory
+ */
+extern void
+copy_to_phys(
+	vm_offset_t 	src_addr_v, 
+	phys_addr_t 	dst_addr_p,
+	int 		count);
+
+/*
+ *	copy_from_phys(src_addr_p, dst_addr_v, count)
+ *
+ *	Copy physical memory to virtual memory.  The virtual memory
+ *	is assumed to be present (e.g. the buffer pool).
+ */
+extern void
+copy_from_phys(
+	phys_addr_t 	src_addr_p, 
+	vm_offset_t 	dst_addr_v,
+	int 		count);
 
 /*
  *  kvtophys(addr)

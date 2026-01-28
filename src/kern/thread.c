@@ -32,19 +32,25 @@
  */
 
 #include <kern/printf.h>
+#include <mach/message.h>
 #include <mach/std_types.h>
 #include <mach/policy.h>
 #include <mach/thread_info.h>
 #include <mach/thread_special_ports.h>
 #include <mach/thread_status.h>
 #include <mach/time_value.h>
+#include <mach/vm_prot.h>
+#include <mach/vm_inherit.h>
 #include <machine/vm_param.h>
 #include <kern/ast.h>
 #include <kern/counters.h>
 #include <kern/debug.h>
 #include <kern/eventcount.h>
+#include <kern/gnumach.server.h>
 #include <kern/ipc_mig.h>
 #include <kern/ipc_tt.h>
+#include <kern/mach_debug.server.h>
+#include <kern/mach_host.server.h>
 #include <kern/processor.h>
 #include <kern/queue.h>
 #include <kern/sched.h>
@@ -55,25 +61,24 @@
 #include <kern/host.h>
 #include <kern/kalloc.h>
 #include <kern/slab.h>
+#include <kern/smp.h>
 #include <kern/mach_clock.h>
+#include <string.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_user.h>
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_port.h>
 #include <ipc/mach_msg.h>
-#include <ipc/mach_port.h>
-#include <machine/machspl.h>		/* for splsched */
+#include <ipc/mach_port.server.h>
+#include <machine/spl.h>		/* for splsched */
 #include <machine/pcb.h>
 #include <machine/thread.h>		/* for MACHINE_STACK */
-
-thread_t active_threads[NCPUS];
-vm_offset_t active_stacks[NCPUS];
 
 struct kmem_cache thread_cache;
 struct kmem_cache thread_stack_cache;
 
 queue_head_t		reaper_queue;
-decl_simple_lock_data(,	reaper_lock)
+def_simple_lock_data(static,	reaper_lock)
 
 /* private */
 struct thread	thread_template;
@@ -81,7 +86,7 @@ struct thread	thread_template;
 #if	MACH_DEBUG
 #define	STACK_MARKER	0xdeadbeefU
 boolean_t		stack_check_usage = FALSE;
-decl_simple_lock_data(,	stack_usage_lock)
+def_simple_lock_data(static,	stack_usage_lock)
 vm_size_t		stack_max_usage = 0;
 #endif	/* MACH_DEBUG */
 
@@ -117,7 +122,7 @@ vm_size_t		stack_max_usage = 0;
  *	because stack_alloc_try/thread_invoke operate at splsched.
  */
 
-decl_simple_lock_data(, stack_lock_data)/* splsched only */
+def_simple_lock_data(static, stack_lock_data)/* splsched only */
 #define stack_lock()	simple_lock(&stack_lock_data)
 #define stack_unlock()	simple_unlock(&stack_lock_data)
 
@@ -423,6 +428,9 @@ kern_return_t thread_create(
 	 */
 
 	new_thread->task = parent_task;
+	if (parent_task && current_thread() && current_task() != kernel_task &&
+		parent_task == current_task() && current_thread()->vm_privilege)
+		new_thread->vm_privilege = 1;
 	simple_lock_init(&new_thread->lock);
 	new_thread->sched_stamp = sched_tick;
 	thread_timeout_setup(new_thread);
@@ -547,6 +555,10 @@ kern_return_t thread_create(
 #endif	/* MACH_PCSAMPLE */
 
 	new_thread->pc_sample.buffer = 0;
+
+	/* Inherit the task name as the thread name. */
+	memcpy (new_thread->name, parent_task->name, THREAD_NAME_SIZE);
+
 	/*
 	 *	Add the thread to the task`s list of threads.
 	 *	The new thread holds another reference to the task.
@@ -590,7 +602,7 @@ void thread_deallocate(
 	task_t		task;
 	processor_set_t	pset;
 
-	time_value_t	user_time, system_time;
+	time_value64_t	user_time, system_time;
 
 	if (thread == THREAD_NULL)
 		return;
@@ -667,8 +679,8 @@ void thread_deallocate(
 	 *	Accumulate times for dead threads in task.
 	 */
 	thread_read_times(thread, &user_time, &system_time);
-	time_value_add(&task->total_user_time, &user_time);
-	time_value_add(&task->total_system_time, &system_time);
+	time_value64_add(&task->total_user_time, &user_time);
+	time_value64_add(&task->total_system_time, &system_time);
 
 	/*
 	 *	Remove thread from task list and processor_set threads list.
@@ -838,9 +850,8 @@ kern_return_t thread_terminate(
 	 *	Reassign thread to default pset if needed.
 	 */
 	thread_freeze(thread);
-	if (thread->processor_set != &default_pset) {
+	if (thread->processor_set != &default_pset)
 		thread_doassign(thread, &default_pset, FALSE);
-	}
 #endif	/* MACH_HOST */
 
 	/*
@@ -862,12 +873,15 @@ kern_return_t thread_terminate(
 kern_return_t thread_terminate_release(
 	thread_t thread,
 	task_t task,
-	mach_port_t thread_name,
-	mach_port_t reply_port,
+	mach_port_name_t thread_name,
+	mach_port_name_t reply_port,
 	vm_offset_t address,
 	vm_size_t size)
 {
 	if (task == NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	if (thread == NULL)
 		return KERN_INVALID_ARGUMENT;
 
 	mach_port_deallocate(task->itk_space, thread_name);
@@ -1075,9 +1089,8 @@ kern_return_t thread_halt(
 		 *	If the thread's at a clean point, we're done.
 		 *	Don't need a lock because it really is stopped.
 		 */
-		if (thread->state & TH_HALTED) {
+		if (thread->state & TH_HALTED)
 			return KERN_SUCCESS;
-		}
 
 		/*
 		 *	If the thread is at a nice continuation,
@@ -1135,7 +1148,7 @@ kern_return_t thread_halt(
 	}
 }
 
-void __attribute__((noreturn)) walking_zombie(void)
+static void __attribute__((noreturn)) walking_zombie(void)
 {
 	panic("the zombie walks!");
 }
@@ -1442,9 +1455,8 @@ kern_return_t thread_get_state(
 		return thread_getstatus(thread, flavor, old_state, old_state_count);
 #endif
 
-	if (thread == THREAD_NULL || thread == current_thread()) {
+	if (thread == THREAD_NULL || thread == current_thread())
 		return KERN_INVALID_ARGUMENT;
-	}
 
 	thread_hold(thread);
 	(void) thread_dowait(thread, TRUE);
@@ -1470,11 +1482,13 @@ kern_return_t thread_set_state(
 	if (flavor == i386_DEBUG_STATE && thread == current_thread())
 		/* This state can be set directly for the curren thread.  */
 		return thread_setstatus(thread, flavor, new_state, new_state_count);
+	if (flavor == i386_FSGS_BASE_STATE && thread == current_thread())
+		/* This state can be set directly for the curren thread.  */
+		return thread_setstatus(thread, flavor, new_state, new_state_count);
 #endif
 
-	if (thread == THREAD_NULL || thread == current_thread()) {
+	if (thread == THREAD_NULL || thread == current_thread())
 		return KERN_INVALID_ARGUMENT;
-	}
 
 	thread_hold(thread);
 	(void) thread_dowait(thread, TRUE);
@@ -1500,13 +1514,13 @@ kern_return_t thread_info(
 	if (flavor == THREAD_BASIC_INFO) {
 	    thread_basic_info_t	basic_info;
 
-	    /* Allow *thread_info_count to be one smaller than the
-	       usual amount, because creation_time is a new member
-	       that some callers might not know about. */
+	    /* Allow *thread_info_count to be smaller than the provided amount
+	     * that does not contain the new time_value64_t fields as some
+	     * callers might not know about them yet. */
 
-	    if (*thread_info_count < THREAD_BASIC_INFO_COUNT - 1) {
+	    if (*thread_info_count <
+			    THREAD_BASIC_INFO_COUNT - 3 * sizeof(time_value64_t)/sizeof(natural_t))
 		return KERN_INVALID_ARGUMENT;
-	    }
 
 	    basic_info = (thread_basic_info_t) thread_info_out;
 
@@ -1522,13 +1536,23 @@ kern_return_t thread_info(
 
 	    /* fill in info */
 
-	    thread_read_times(thread,
-			&basic_info->user_time,
-			&basic_info->system_time);
+	    time_value64_t user_time, system_time;
+	    thread_read_times(thread, &user_time, &system_time);
+	    TIME_VALUE64_TO_TIME_VALUE(&user_time, &basic_info->user_time);
+	    TIME_VALUE64_TO_TIME_VALUE(&system_time, &basic_info->system_time);
+
 	    basic_info->base_priority	= thread->priority;
 	    basic_info->cur_priority	= thread->sched_pri;
-	    read_time_stamp(&thread->creation_time,
-			    &basic_info->creation_time);
+	    time_value64_t creation_time;
+	    read_time_stamp(&thread->creation_time, &creation_time);
+	    TIME_VALUE64_TO_TIME_VALUE(&creation_time, &basic_info->creation_time);
+
+	    if (*thread_info_count == THREAD_BASIC_INFO_COUNT) {
+		/* Copy new time_value64_t fields */
+		basic_info->user_time64 = user_time;
+		basic_info->system_time64 = user_time;
+		basic_info->creation_time64 = creation_time;
+	    }
 
 	    /*
 	     *	To calculate cpu_usage, first correct for timer rate,
@@ -1583,9 +1607,8 @@ kern_return_t thread_info(
 	    /* Allow *thread_info_count to be one smaller than the
 	       usual amount, because last_processor is a
 	       new member that some callers might not know about. */
-	    if (*thread_info_count < THREAD_SCHED_INFO_COUNT -1) {
+	    if (*thread_info_count < THREAD_SCHED_INFO_COUNT -1)
 		    return KERN_INVALID_ARGUMENT;
-	    }
 
 	    sched_info = (thread_sched_info_t) thread_info_out;
 
@@ -1594,12 +1617,11 @@ kern_return_t thread_info(
 
 #if	MACH_FIXPRI
 	    sched_info->policy = thread->policy;
-	    if (thread->policy == POLICY_FIXEDPRI) {
+	    if (thread->policy == POLICY_FIXEDPRI)
 		sched_info->data = (thread->sched_data * tick)/1000;
-	    }
-	    else {
+	    else
 		sched_info->data = 0;
-	    }
+
 #else	/* MACH_FIXPRI */
 	    sched_info->policy = POLICY_TIMESHARE;
 	    sched_info->data = 0;
@@ -1608,15 +1630,16 @@ kern_return_t thread_info(
 	    sched_info->base_priority = thread->priority;
 	    sched_info->max_priority = thread->max_priority;
 	    sched_info->cur_priority = thread->sched_pri;
-	    
+
 	    sched_info->depressed = (thread->depress_priority >= 0);
 	    sched_info->depress_priority = thread->depress_priority;
 
 #if NCPUS > 1
-	    sched_info->last_processor = thread->last_processor;
-#else
-	    sched_info->last_processor = 0;
+	    if (thread->last_processor)
+		sched_info->last_processor = thread->last_processor->slot_num;
+	    else
 #endif
+		sched_info->last_processor = 0;
 
 	    thread_unlock(thread);
 	    splx(s);
@@ -1637,8 +1660,9 @@ kern_return_t	thread_abort(
 
 	/*
 	 *
-         *	clear it of an event wait 
-         */
+	 *	clear it of an event wait
+	 */
+
 	evc_notify_abort(thread);
 
 	/*
@@ -1691,6 +1715,7 @@ thread_start(
 
 thread_t kernel_thread(
 	task_t		task,
+	const char *	name,
 	continuation_t	start,
 	void *		arg)
 {
@@ -1724,7 +1749,7 @@ thread_t kernel_thread(
  *	This kernel thread runs forever looking for threads to destroy
  *	(when they request that they be destroyed, of course).
  */
-void __attribute__((noreturn)) reaper_thread_continue(void)
+static void __attribute__((noreturn)) reaper_thread_continue(void)
 {
 	for (;;) {
 		thread_t thread;
@@ -1770,9 +1795,8 @@ void reaper_thread(void)
  */
 
 kern_return_t
-thread_assign(
-	thread_t	thread,
-	processor_set_t	new_pset)
+thread_assign(thread_t thread,
+	      processor_set_t new_pset)
 {
 	if (thread == THREAD_NULL || new_pset == PROCESSOR_SET_NULL) {
 		return KERN_INVALID_ARGUMENT;
@@ -1791,8 +1815,7 @@ thread_assign(
  *	Only one freeze may be held per thread.  
  */
 void
-thread_freeze(
-	thread_t	thread)
+thread_freeze(thread_t thread)
 {
 	spl_t	s;
 	/*
@@ -1809,7 +1832,6 @@ thread_freeze(
 	thread->may_assign = FALSE;
 	thread_unlock(thread);
 	(void) splx(s);
-
 }
 
 /*
@@ -1912,7 +1934,7 @@ Restart:
 	 *	Reset policy and priorities if needed.
 	 */
 #if	MACH_FIXPRI
-	if (thread->policy & new_pset->policies == 0) {
+	if ((thread->policy & new_pset->policies) == 0) {
 	    thread->policy = POLICY_TIMESHARE;
 	    recompute_pri = TRUE;
 	}
@@ -2036,17 +2058,16 @@ thread_priority(
     /*
      *	Check for violation of max priority
      */
-    if (priority < thread->max_priority) {
+    if (priority < thread->max_priority)
 	ret = KERN_FAILURE;
-    }
     else {
 	/*
 	 *	Set priorities.  If a depression is in progress,
 	 *	change the priority to restore.
 	 */
-	if (thread->depress_priority >= 0) {
+	if (thread->depress_priority >= 0)
 	    thread->depress_priority = priority;
-	}
+
 	else {
 	    thread->priority = priority;
 	    compute_priority(thread, TRUE);
@@ -2101,7 +2122,7 @@ thread_max_priority(
     kern_return_t	ret = KERN_SUCCESS;
 
     if ((thread == THREAD_NULL) || (pset == PROCESSOR_SET_NULL) ||
-    	invalid_pri(max_priority))
+	invalid_pri(max_priority))
 	    return KERN_INVALID_ARGUMENT;
 
     s = splsched();
@@ -2111,9 +2132,9 @@ thread_max_priority(
     /*
      *	Check for wrong processor set.
      */
-    if (pset != thread->processor_set) {
+    if (pset != thread->processor_set)
 	ret = KERN_FAILURE;
-    }
+
     else {
 #endif	/* MACH_HOST */
 	thread->max_priority = max_priority;
@@ -2185,9 +2206,8 @@ thread_policy(
 	    /*
 	     *	Changing policy.  Check if new policy is allowed.
 	     */
-	    if ((thread->processor_set->policies & policy) == 0) {
+	    if ((thread->processor_set->policies & policy) == 0)
 		    ret = KERN_FAILURE;
-	    }
 	    else {
 		/*
 		 *	Changing policy.  Save data and calculate new
@@ -2268,7 +2288,7 @@ thread_wire(
  *	pcb_collect doesn't do anything yet.
  */
 
-void thread_collect_scan(void)
+static void thread_collect_scan(void)
 {
 	thread_t	thread, prev_thread;
 	processor_set_t		pset, prev_pset;
@@ -2355,8 +2375,7 @@ void consider_thread_collect(void)
 
 #if	MACH_DEBUG
 
-vm_size_t stack_usage(
-	vm_offset_t stack)
+static vm_size_t stack_usage(vm_offset_t stack)
 {
 	unsigned i;
 
@@ -2409,7 +2428,7 @@ void stack_finalize(
  *	*maxusagep must be initialized by the caller.
  */
 
-void stack_statistics(
+static void stack_statistics(
 	natural_t *totalp,
 	vm_size_t *maxusagep)
 {
@@ -2562,9 +2581,9 @@ kern_return_t processor_set_stack_usage(
 
 			stack = thread->kernel_stack;
 
-			for (cpu = 0; cpu < NCPUS; cpu++)
-				if (active_threads[cpu] == thread) {
-					stack = active_stacks[cpu];
+			for (cpu = 0; cpu < smp_get_numcpus(); cpu++)
+				if (percpu_array[cpu].active_thread == thread) {
+					stack = percpu_array[cpu].active_stack;
 					break;
 				}
 		}
@@ -2614,3 +2633,42 @@ thread_stats(void)
 	printf("%d using rpc_reply.\n", rpcreply);
 }
 #endif	/* MACH_DEBUG */
+
+/*
+ *	thread_set_name
+ *
+ *	Set the name of thread THREAD to NAME.
+ */
+kern_return_t
+thread_set_name(
+	thread_t	thread,
+	const_kernel_debug_name_t	name)
+{
+	if (thread == THREAD_NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	strncpy(thread->name, name, sizeof thread->name - 1);
+	thread->name[sizeof thread->name - 1] = '\0';
+	return KERN_SUCCESS;
+}
+
+/*
+ *  thread_get_name
+ *
+ *  Return the name of the thread THREAD.
+ *  Will use the name of the thread as set by thread_set_name.
+ *  If thread_set_name was not used, this will return the name of the task
+ *  copied when the thread was created.
+ */
+kern_return_t
+thread_get_name(
+		thread_t	thread,
+		kernel_debug_name_t	name)
+{
+	if (thread == THREAD_NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	strncpy(name, thread->name, sizeof thread->name);
+
+	return KERN_SUCCESS;
+}

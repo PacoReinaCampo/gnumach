@@ -32,6 +32,7 @@
 #include <mach/boolean.h>
 #include <mach/kern_return.h>
 #include <mach/mach_param.h>
+#include <mach/mach_traps.h>
 #include <mach/task_special_ports.h>
 #include <mach/thread_special_ports.h>
 #include <vm/vm_kern.h>
@@ -41,6 +42,7 @@
 #include <kern/thread.h>
 #include <kern/ipc_kobject.h>
 #include <kern/ipc_tt.h>
+#include <kern/mach.server.h>
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_table.h>
 #include <ipc/ipc_port.h>
@@ -511,7 +513,7 @@ retrieve_thread_exception(thread)
  *		or other errors.
  */
 
-mach_port_t
+mach_port_name_t
 mach_task_self(void)
 {
 	task_t task = current_task();
@@ -532,7 +534,7 @@ mach_task_self(void)
  *		or other errors.
  */
 
-mach_port_t
+mach_port_name_t
 mach_thread_self(void)
 {
 	thread_t thread = current_thread();
@@ -554,11 +556,11 @@ mach_thread_self(void)
  *		or other errors.
  */
 
-mach_port_t
+mach_port_name_t
 mach_reply_port(void)
 {
 	ipc_port_t port;
-	mach_port_t name;
+	mach_port_name_t name;
 	kern_return_t kr;
 
 	kr = ipc_port_alloc(current_task()->itk_space, &name, &port);
@@ -887,7 +889,7 @@ mach_ports_register(
 kern_return_t
 mach_ports_lookup(
 	task_t 			task,
-	ipc_port_t 		**portsp,
+	mach_port_t 		**portsp,
 	mach_msg_type_number_t 	*portsCnt)
 {
 	vm_offset_t memory;
@@ -924,7 +926,7 @@ mach_ports_lookup(
 
 	itk_unlock(task);
 
-	*portsp = ports;
+	*portsp = (mach_port_t *)ports;
 	*portsCnt = TASK_PORT_REGISTER_MAX;
 	return KERN_SUCCESS;
 }

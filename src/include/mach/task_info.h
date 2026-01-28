@@ -54,51 +54,65 @@ typedef	integer_t	task_info_data_t[TASK_INFO_MAX];
 struct task_basic_info {
 	integer_t	suspend_count;	/* suspend count for task */
 	integer_t	base_priority;	/* base scheduling priority */
-	vm_size_t	virtual_size;	/* number of virtual pages */
-	vm_size_t	resident_size;	/* number of resident pages */
-	time_value_t	user_time;	/* total user run time for
+	rpc_vm_size_t	virtual_size;	/* number of virtual pages */
+	rpc_vm_size_t	resident_size;	/* number of resident pages */
+	/* Deprecated, please use user_time64 */
+	rpc_time_value_t	user_time;	/* total user run time for
 					   terminated threads */
-	time_value_t	system_time;	/* total system run time for
+	/* Deprecated, please use system_time64 */
+	rpc_time_value_t	system_time;	/* total system run time for
 					   terminated threads */
-	time_value_t	creation_time;  /* creation time stamp */
+	/* Deprecated, please use creation_time64 */
+	rpc_time_value_t	creation_time;  /* creation time stamp */
+	time_value64_t		user_time64;	/* total user run time for
+						   terminated threads */
+	time_value64_t		system_time64;	/* total system run time for
+						   terminated threads */
+	time_value64_t		creation_time64;	/* creation time stamp */
 };
 
 typedef struct task_basic_info		task_basic_info_data_t;
 typedef struct task_basic_info		*task_basic_info_t;
 #define	TASK_BASIC_INFO_COUNT	\
-		(sizeof(task_basic_info_data_t) / sizeof(natural_t))
+		(sizeof(task_basic_info_data_t) / sizeof(integer_t))
 
 
 #define	TASK_EVENTS_INFO	2	/* various event counts */
 
 struct task_events_info {
-	natural_t		faults;		/* number of page faults */
-	natural_t		zero_fills;	/* number of zero fill pages */
-	natural_t		reactivations;	/* number of reactivated pages */
-	natural_t		pageins;	/* number of actual pageins */
-	natural_t		cow_faults;	/* number of copy-on-write faults */
-	natural_t		messages_sent;	/* number of messages sent */
-	natural_t		messages_received; /* number of messages received */
+	rpc_long_natural_t 	faults;		/* number of page faults */
+	rpc_long_natural_t	zero_fills;	/* number of zero fill pages */
+	rpc_long_natural_t	reactivations;	/* number of reactivated pages */
+	rpc_long_natural_t	pageins;	/* number of actual pageins */
+	rpc_long_natural_t	cow_faults;	/* number of copy-on-write faults */
+	rpc_long_natural_t	messages_sent;	/* number of messages sent */
+	rpc_long_natural_t	messages_received; /* number of messages received */
 };
 typedef struct task_events_info		task_events_info_data_t;
 typedef struct task_events_info		*task_events_info_t;
 #define	TASK_EVENTS_INFO_COUNT	\
-		(sizeof(task_events_info_data_t) / sizeof(natural_t))
+		(sizeof(task_events_info_data_t) / sizeof(integer_t))
 
 #define	TASK_THREAD_TIMES_INFO	3	/* total times for live threads -
 					   only accurate if suspended */
 
 struct task_thread_times_info {
-	time_value_t	user_time;	/* total user run time for
+	/* Deprecated, please use user_time64 */
+	rpc_time_value_t	user_time;	/* total user run time for
 					   live threads */
-	time_value_t	system_time;	/* total system run time for
+	/* Deprecated, please use system_time64 */
+	rpc_time_value_t	system_time;	/* total system run time for
 					   live threads */
+	time_value64_t		user_time64;	/* total user run time for
+						   live threads */
+	time_value64_t		system_time64;	/* total system run time for
+						   live threads */
 };
 
 typedef struct task_thread_times_info	task_thread_times_info_data_t;
 typedef struct task_thread_times_info	*task_thread_times_info_t;
 #define	TASK_THREAD_TIMES_INFO_COUNT	\
-		(sizeof(task_thread_times_info_data_t) / sizeof(natural_t))
+		(sizeof(task_thread_times_info_data_t) / sizeof(integer_t))
 
 /*
  * Flavor definitions for task_ras_control

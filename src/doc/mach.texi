@@ -203,6 +203,7 @@ Virtual Memory Interface
 * Data Transfer::                 Reading, writing and copying memory.
 * Memory Attributes::             Tweaking memory regions.
 * Mapping Memory Objects::        How to map memory objects.
+* Memory Limitations::            Tweaking virtual memory space limts.
 * Memory Statistics::             How to get statistics about memory usage.
 
 External Memory Management
@@ -2787,6 +2788,26 @@ from the call's server (normally the kernel), the call may return
 @code{mach_msg} return codes.
 @end deftypefun
 
+@deftypefun kern_return_t mach_port_set_ktype (@w{host_priv_t @var{host_priv}}, @w{ipc_space_t @var{task}}, @w{mach_port_t @var{name}}, @w{mach_port_right_t @var{right}}, @w{mach_port_ktype_t @var{ktype}})
+The function @code{mach_port_set_ktype} sets the ktype of the right @var{right}
+of the port @var{name}.
+
+For now, this can be used only to set the @code{MACH_PORT_KTYPE_USER_DEVICE}
+ktype, or back to @code{MACH_PORT_KTYPE_NONE}.
+
+@code{MACH_PORT_KTYPE_USER_DEVICE} notably makes ipc_kmsg_copyin_body use page
+lists, which keep them in a busy state that prevents them from being paged out.
+
+The function returns @code{KERN_SUCCESS} if the call succeeded,
+@code{KERN_INVALID_HOST} if @var{host} was not a valid host
+port, @code{KERN_INVALID_TASK} if @var{task} was not a valid
+task, @code{KERN_INVALID_NAME} if @var{name} doesn't denote a
+right, @code{KERN_INVALID_RIGHT} if the name doesn't denote the
+correct right, @code{KERN_INVALID_ARGUMENT} if @var{ktype} is not
+@code{MACH_PORT_KTYPE_USER_DEVICE} or @code{MACH_PORT_KTYPE_NONE} or the port
+right does not currently have such a type.
+@end deftypefun
+
 @node Port Sets
 @subsection Port Sets
 
@@ -3009,7 +3030,9 @@ the kernel.
 * Data Transfer::                 Reading, writing and copying memory.
 * Memory Attributes::             Tweaking memory regions.
 * Mapping Memory Objects::        How to map memory objects.
+* Memory Limitations::            Tweaking virtual memory limits.
 * Memory Statistics::             How to get statistics about memory usage.
+* Memory physical addresses::     How to get physical addresses of memory.
 @end menu
 
 @node Memory Allocation
@@ -3434,8 +3457,8 @@ exception.
 @var{address}.  If the @var{anywhere} option is used, this address is
 ignored.  The address actually allocated will be returned in
 @var{address}. @var{size} is the number of bytes to allocate (rounded by
-the system in a machine dependent way).  The alignment restriction is
-specified by @var{mask}.  Bits asserted in this mask must not be
+the system in a machine dependent way).  The alignment and maximum address
+restrictions are specified by @var{mask}.  Bits asserted in this mask must not be
 asserted in the address returned.  If @var{anywhere} is set, the kernel
 should find and allocate any region of the specified size, and return
 the address of the resulting region in @var{address}.
@@ -3452,6 +3475,33 @@ The function returns @code{KERN_SUCCESS} if the object is mapped,
 @code{KERN_NO_SPACE} if no unused region of the task's virtual address
 space that meets the address, size, and alignment criteria could be
 found, and @code{KERN_INVALID_ARGUMENT} if an invalid argument was provided.
+@end deftypefun
+
+
+@node Memory Limitations
+@section Memory Limitations
+
+@deftypefun kern_reutrn_t vm_get_size_limit (@w{vm_task_t @var{map}}, @w{vm_size_t *@var{current_limit}}, @w{vm_size_t *@var{max_limit}})
+This function will return the current limit and the maximum limit of the
+virtual memory address space of the task indicated by the @var{map} argument
+in the parameters @var{current_limit} and @var{max_limit}, respectively.
+@end deftypefun
+
+@deftypefun kern_return_t vm_set_size_limit (@w{mach_port_t @var{host_port}}, @w{vm_task_t @var{map}}, @w{vm_size_t @var{current_limit}}, @w{vm_size_t @var{max_limit}})
+This function shall be used to update the virtual address space limits
+of the task given by the @var{map} argument.
+
+If the value of the argument @var{current_limit} is greater than @var{max_limit},
+the function returns @code{KERN_INVALID_ARGUMENT}. The privileged host port
+must be provided in the @var{host_port} argument when the function is used
+to increase the current max limit of the address space. Otherwise the function
+returns @code{KERN_NO_ACCESS}.
+
+The function returns @code{KERN_INVALID_TASK} or @code{KERN_INVALID_HOST} when
+the arguments @var{map} and @var{host_port} are not a vlaid task or host, respectively.
+
+@code{KERN_SUCCESS} is returned when the map limits could be updated
+successfuly.
 @end deftypefun
 
 
@@ -3511,6 +3561,23 @@ kernel's use of virtual memory since the kernel was booted.
 @code{pagesize} can also be found as a global variable
 @code{vm_page_size} which is set at task initialization and remains
 constant for the life of the task.
+@end deftypefun
+
+
+@node Memory physical addresses
+@section Memory physical addresses
+
+@deftypefun kern_return_t vm_pages_phys (@w{host_t @var{host}}, @w{vm_task_t @var{target_task}}, @w{vm_address_t @var{address}}, @w{vm_size_t @var{size}}, @w{rpc_phys_addr_array_t *@var{pages}, @w{mach_msg_type_number_t *@var{pagesCnt}}})
+The function @code{vm_pages_phys} retrieves the physical addresses of the
+specified region (@var{size} bytes starting from @var{address}) of
+@var{target_task}'s virtual address space.
+
+Both @var{address} and @var{size} have to be aligned on @code{vm_page_size}.
+
+@var{pages} is an array of @code{rpc_phys_addr_array_t} that is supplied by the
+caller and returned filled with the physical page numbers. @var{pagesCnt} is
+supplied as the maximum number of elements in the @var{pages} array.  On
+return, it contains the actual number of integers in @var{pages}.
 @end deftypefun
 
 
@@ -3712,7 +3779,7 @@ written, in bytes.  This will be an integral number of memory object
 pages.
 
 The kernel will also use this call to return precious pages.  If an
-unmodified precious age is returned, @var{dirty} is set to @code{FALSE},
+unmodified precious page is returned, @var{dirty} is set to @code{FALSE},
 otherwise it is @code{TRUE}.  If @var{kernel_copy} is @code{TRUE}, the
 kernel kept a copy of the page.  Precious data remains precious if the
 kernel keeps a copy.  The indication that the kernel kept a copy is only
@@ -4399,12 +4466,26 @@ The current scheduling priority of the thread.
 
 @item int depress_priority
 The priority the thread was depressed from.
+
+@item int last_processor
+The last processor used by the thread.
 @end table
 @end deftp
 
 @deftp {Data type} thread_sched_info_t
 This is a pointer to a @code{struct thread_sched_info}.
 @end deftp
+
+@deftypefun kern_return_t thread_set_name (@w{thread_t @var{target_thread}}, @w{const_kernel_debug_name_t @var{name}})
+
+The function @code{thread_set_name} sets the name of @var{target_thread}
+to @var{name}, truncating it if necessary.
+
+This is a debugging aid.  The name is used in diagnostic messages
+printed by the kernel.
+
+The function returns @code{KERN_SUCCESS} if the call succeeded.
+@end deftypefun
 
 
 @node Thread Settings
@@ -4827,11 +4908,11 @@ argument set to @code{THREAD_EXCEPTION_PORT}.
 @node Exceptions
 @subsection Exceptions
 
-@deftypefun kern_return_t catch_exception_raise (@w{mach_port_t @var{exception_port}}, @w{thread_t @var{thread}}, @w{task_t @var{task}}, @w{int @var{exception}}, @w{int @var{code}}, @w{int @var{subcode}})
+@deftypefun kern_return_t catch_exception_raise (@w{mach_port_t @var{exception_port}}, @w{thread_t @var{thread}}, @w{task_t @var{task}}, @w{int @var{exception}}, @w{int @var{code}}, @w{long @var{subcode}})
 XXX Fixme
 @end deftypefun
 
-@deftypefun kern_return_t exception_raise (@w{mach_port_t @var{exception_port}}, @w{mach_port_t @var{thread}}, @w{mach_port_t @var{task}}, @w{integer_t @var{exception}}, @w{integer_t @var{code}}, @w{integer_t @var{subcode}})
+@deftypefun kern_return_t exception_raise (@w{mach_port_t @var{exception_port}}, @w{mach_port_t @var{thread}}, @w{mach_port_t @var{task}}, @w{integer_t @var{exception}}, @w{integer_t @var{code}}, @w{long_integer_t @var{subcode}})
 XXX Fixme
 @end deftypefun
 
@@ -5008,10 +5089,10 @@ suspend count for task
 @item integer_t base_priority
 base scheduling priority
 
-@item vm_size_t virtual_size
+@item rpc_vm_size_t virtual_size
 number of virtual pages
 
-@item vm_size_t resident_size
+@item rpc_vm_size_t resident_size
 number of resident pages
 
 @item time_value_t user_time
@@ -5038,25 +5119,25 @@ provided it as the @var{task_info} parameter for the
 following members:
 
 @table @code
-@item natural_t faults
+@item rpc_long_natural_t faults
 number of page faults
 
-@item natural_t zero_fills
+@item rpc_long_natural_t zero_fills
 number of zero fill pages
 
-@item natural_t reactivations
+@item rpc_long_natural_t reactivations
 number of reactivated pages
 
-@item natural_t pageins
+@item rpc_long_natural_t pageins
 number of actual pageins
 
-@item natural_t cow_faults
+@item rpc_long_natural_t cow_faults
 number of copy-on-write faults
 
-@item natural_t messages_sent
+@item rpc_long_natural_t messages_sent
 number of messages sent
 
-@item natural_t messages_received
+@item rpc_long_natural_t messages_received
 number of messages received
 @end table
 @end deftp
@@ -5086,13 +5167,24 @@ total system run time for live threads
 This is a pointer to a @code{struct task_thread_times_info}.
 @end deftp
 
-@deftypefun kern_return_t task_set_name (@w{task_t @var{target_task}}, @w{kernel_debug_name_t @var{name}})
+@deftypefun kern_return_t task_set_name (@w{task_t @var{target_task}}, @w{const_kernel_debug_name_t @var{name}})
 
 The function @code{task_set_name} sets the name of @var{target_task}
 to @var{name}, truncating it if necessary.
 
 This is a debugging aid.  The name is used in diagnostic messages
 printed by the kernel.
+
+The function returns @code{KERN_SUCCESS} if the call succeeded.
+@end deftypefun
+
+@deftypefun kern_return_t task_set_essential (@w{task_t @var{target_task}}, @w{boolean_t @var{essential}})
+
+The function @code{task_set_essential} sets whether @var{target_task} is
+essential for the system, i.e. the system will completely crash and reboot if
+that task crashes. This means that when the debugger is enabled, it should be
+triggered on the crash, so as to get the opportunity to debug the issue instead
+of just rebooting.
 
 The function returns @code{KERN_SUCCESS} if the call succeeded.
 @end deftypefun
@@ -5563,8 +5655,8 @@ The minimum quantum and unit of quantum in milliseconds.
 This is a pointer to a @code{struct host_sched_info}.
 @end deftp
 
-@deftypefun kern_return_t host_kernel_version (@w{host_t @var{host}}, @w{kernel_version_t *@var{version}})
-The @code{host_kernel_version} function returns the version string
+@deftypefun kern_return_t host_get_kernel_version (@w{host_t @var{host}}, @w{kernel_version_t *@var{version}})
+The @code{host_get_kernel_version} function returns the version string
 compiled into the kernel executing on @var{host} at the time it was
 built in the character string @var{version}.  This string describes the
 version of the kernel.  The constant @code{KERNEL_VERSION_MAX} should be
@@ -5581,65 +5673,56 @@ inaccessible memory, it returns @code{KERN_INVALID_ADDRESS}, and
 @code{KERN_SUCCESS} otherwise.
 @end deftypefun
 
-@deftypefun kern_return_t host_get_boot_info (@w{host_priv_t @var{host_priv}}, @w{kernel_boot_info_t @var{boot_info}})
-The @code{host_get_boot_info} function returns the boot-time information
-string supplied by the operator to the kernel executing on
-@var{host_priv} in the character string @var{boot_info}.  The constant
-@code{KERNEL_BOOT_INFO_MAX} should be used to dimension storage for the
-returned string if the @code{kernel_boot_info_t} declaration is not
-used.
-
-If the boot-time information string supplied by the operator is longer
-than @code{KERNEL_BOOT_INFO_MAX}, the result is truncated and not
-necessarily null-terminated.
-@end deftypefun
-
-
 @node Host Time
 @section Host Time
 
-@deftp {Data type} time_value_t
+@deftp {Data type} time_value64_t
 This is the representation of a time in Mach.  It is a @code{struct
-time_value} and consists of the following members:
+time_value64} and consists of the following members:
 
 @table @code
-@item integer_t seconds
+@item int64_t seconds
 The number of seconds.
-@item integer_t microseconds
-The number of microseconds.
+@item int64_t nanoseconds
+The number of nanoseconds.
 @end table
 @end deftp
 
-The number of microseconds should always be smaller than
-@code{TIME_MICROS_MAX} (100000).  A time with this property is
+The number of nanoseconds should always be smaller than
+@code{TIME_NANOS_MAX} (100000000).  A time with this property is
 @dfn{normalized}.  Normalized time values can be manipulated with the
 following macros:
 
-@defmac time_value_add_usec (@w{time_value_t *@var{val}}, @w{integer_t *@var{micros}})
-Add @var{micros} microseconds to @var{val}.  If @var{val} is normalized
-and @var{micros} smaller than @code{TIME_MICROS_MAX}, @var{val} will be
+@defmac time_value64_add_nanos (@w{time_value64_t *@var{val}}, @w{int64_t *@var{nanos}})
+Add @var{nanos} nanoseconds to @var{val}.  If @var{val} is normalized
+and @var{nanos} smaller than @code{TIME_NANOS_MAX}, @var{val} will be
 normalized afterwards.
 @end defmac
 
-@defmac time_value_add (@w{time_value_t *@var{result}}, @w{time_value_t *@var{addend}})
+@defmac time_value64_add (@w{time_value64_t *@var{result}}, @w{time_value64_t *@var{addend}})
 Add the values in @var{addend} to @var{result}.  If both are normalized,
 @var{result} will be normalized afterwards.
 @end defmac
 
-A variable of type @code{time_value_t} can either represent a duration
+A variable of type @code{time_value64_t} can either represent a duration
 or a fixed point in time.  In the latter case, it shall be interpreted as
-the number of seconds and microseconds after the epoch 1. Jan 1970.
+the number of seconds and nanoseconds after the epoch 1. Jan 1970.
 
-@deftypefun kern_return_t host_get_time (@w{host_t @var{host}}, @w{time_value_t *@var{current_time}})
+@deftypefun kern_return_t host_get_time64 (@w{host_t @var{host}}, @w{time_value64_t *@var{current_time}})
 Get the current time as seen by @var{host}.  On success, the time passed
 since the epoch is returned in @var{current_time}.
 @end deftypefun
 
-@deftypefun kern_return_t host_set_time (@w{host_priv_t @var{host_priv}}, @w{time_value_t @var{new_time}})
+@deftypefun kern_return_t host_get_uptime64 (@w{host_t @var{host}}, @w{time_value64_t *@var{uptime}})
+Get the elapsed time since the boot up as seen by @var{host}.  On success, the time passed
+since the boot up is returned in @var{uptime}.
+@end deftypefun
+
+@deftypefun kern_return_t host_set_time64 (@w{host_priv_t @var{host_priv}}, @w{time_value64_t @var{new_time}})
 Set the time of @var{host_priv} to @var{new_time}.
 @end deftypefun
 
-@deftypefun kern_return_t host_adjust_time (@w{host_priv_t @var{host_priv}}, @w{time_value_t @var{new_adjustment}}, @w{time_value_t *@var{old_adjustment}})
+@deftypefun kern_return_t host_adjust_time64 (@w{host_priv_t @var{host_priv}}, @w{time_value64_t @var{new_adjustment}}, @w{time_value64_t *@var{old_adjustment}})
 Arrange for the current time as seen by @var{host_priv} to be gradually
 changed by the adjustment value @var{new_adjustment}, and return the old
 adjustment value in @var{old_adjustment}.
@@ -5661,6 +5744,14 @@ The number of microseconds.
 
 @item integer_t check_seconds
 This is a copy of the seconds value, which must be checked to protect
+against a race condition when reading out the two time values. This
+should only be used when getting the 32 bit version of @code{time_value64_t}.
+
+@item time_value64_t time_value
+The current time.
+
+@item int64_t check_seconds64
+This is a copy of the seconds value in @var{time_value}, which must be checked to protect
 against a race condition when reading out the two time values.
 @end table
 @end deftp
@@ -5672,12 +5763,12 @@ mapped-time interface:
 @example
 do 
   @{
-    secs = mtime->seconds;
+    secs = mtime->time_value.seconds;
     __sync_synchronize();
-    usecs = mtime->microseconds;
+    nanos = mtime->time_value.nanoseconds;
     __sync_synchronize();
   @}
-while (secs != mtime->check_seconds);
+while (secs != mtime->check_seconds64);
 @end example
 
 
@@ -6910,6 +7001,10 @@ Examine backward.  It executes an examine command with the last
 specified parameters to it except that the last start address subtracted
 by the size displayed by it is used as the start address.
 
+@item whatis @var{addr}
+Try to find what this address is. This looks up in the various tasks, threads,
+maps, caches etc. to give an idea what is behind this address.
+
 @item print[/axzodurc] @var{addr1} [ @var{addr2} @dots{} ]
 Print @var{addr}'s according to the modifier character.  Valid formats
 are: @code{a} @code{x} @code{z} @code{o} @code{d} @code{u} @code{r}
@@ -7119,9 +7214,15 @@ information about the individual threads.
 Display the information of a task specified by @var{addr}.  If
 @var{addr} is omitted, current task information is displayed.
 
+@code{show task $taskxx} can notably be used to show task number
+@var{xx}
+
 @item show thread [ @var{addr} ]
 Display the information of a thread specified by @var{addr}.  If
 @var{addr} is omitted, current thread information is displayed.
+
+@code{show thread $taskxx.yy} can notably be used to show thread
+number @var{yy} of task number @var{xx}.
 
 @item show registers[/tu [ @var{thread} ]]
 Display the register set.  Target thread can be specified with @code{t}
@@ -7133,6 +7234,9 @@ machine.  If not supported, incorrect information will be displayed.
 
 @item show map @var{addr}
 Prints the @code{vm_map} at @var{addr}.
+
+@code{show map $mapxx} can notably be used to show the map of task
+number @var{xx}.
 
 @item show object @var{addr}
 Prints the @code{vm_object} at @var{addr}.

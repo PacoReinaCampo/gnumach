@@ -51,6 +51,7 @@
 #include "eflags.h"
 #include "gdt.h"
 #include "ldt.h"
+#include "msr.h"
 #include "ktss.h"
 #include "pcb.h"
 
@@ -144,16 +145,28 @@ void switch_ktss(pcb_t pcb)
 	 *	won`t save the v86 segments, so we leave room.
 	 */
 
+#if !defined(__x86_64__) || defined(USER32)
 	pcb_stack_top = (pcb->iss.efl & EFL_VM)
 			? (long) (&pcb->iss + 1)
 			: (long) (&pcb->iss.v86_segs);
+#else
+	pcb_stack_top = (vm_offset_t) (&pcb->iss + 1);
+#endif
+
+#ifdef __x86_64__
+	assert((pcb_stack_top & 0xF) == 0);
+#endif
 
 #ifdef	MACH_RING1
 	/* No IO mask here */
 	if (hyp_stack_switch(KERNEL_DS, pcb_stack_top))
 		panic("stack_switch");
 #else	/* MACH_RING1 */
+#ifdef __x86_64__
+	curr_ktss(mycpu)->tss.rsp0 = pcb_stack_top;
+#else /* __x86_64__ */
 	curr_ktss(mycpu)->tss.esp0 = pcb_stack_top;
+#endif /* __x86_64__ */
 #endif	/* MACH_RING1 */
     }
 
@@ -214,6 +227,11 @@ void switch_ktss(pcb_t pcb)
     memcpy (gdt_desc_p (mycpu, USER_GDT),
         pcb->ims.user_gdt, sizeof pcb->ims.user_gdt);
 #endif /* MACH_PV_DESCRIPTORS */
+
+#if defined(__x86_64__) && !defined(USER32)
+	wrmsr(MSR_REG_FSBASE, pcb->ims.sbs.fsbase);
+	wrmsr(MSR_REG_KGSBASE, pcb->ims.sbs.gsbase);
+#endif
 
 	db_load_context(pcb);
 
@@ -298,7 +316,7 @@ void stack_handoff(
 	stack = current_stack();
 	old->kernel_stack = 0;
 	new->kernel_stack = stack;
-	active_threads[mycpu] = new;
+	percpu_assign(active_thread, new);
 
 	/*
 	 *	Switch exception link to point to new
@@ -316,6 +334,7 @@ void load_context(thread_t new)
 {
 	switch_ktss(new->pcb);
 	Load_context(new);
+	/*NOTREACHED*/
 }
 
 /*
@@ -325,7 +344,7 @@ void load_context(thread_t new)
  */
 thread_t switch_context(
 	thread_t	old,
-	void 		(*continuation)(),
+	continuation_t	continuation,
 	thread_t	new)
 {
 	/*
@@ -365,14 +384,13 @@ thread_t switch_context(
 	 *	Load the rest of the user state for the new thread
 	 */
 	switch_ktss(new->pcb);
-
 	return Switch_context(old, continuation, new);
 }
 
 void pcb_module_init(void)
 {
-	kmem_cache_init(&pcb_cache, "pcb", sizeof(struct pcb), 0,
-			NULL, 0);
+	kmem_cache_init(&pcb_cache, "pcb", sizeof(struct pcb),
+			KERNEL_STACK_ALIGN, NULL, 0);
 
 	fpu_module_init();
 }
@@ -400,10 +418,12 @@ void pcb_init(task_t parent_task, thread_t thread)
 	 */
 	pcb->iss.cs = USER_CS;
 	pcb->iss.ss = USER_DS;
+#if !defined(__x86_64__) || defined(USER32)
 	pcb->iss.ds = USER_DS;
 	pcb->iss.es = USER_DS;
 	pcb->iss.fs = USER_DS;
 	pcb->iss.gs = USER_DS;
+#endif
 	pcb->iss.efl = EFL_USER_SET;
 
 	thread->pcb = pcb;
@@ -435,8 +455,7 @@ void pcb_terminate(thread_t thread)
  *	Attempt to free excess pcb memory.
  */
 
-void pcb_collect(thread)
-	const thread_t thread;
+void pcb_collect(__attribute__((unused)) const thread_t thread)
 {
 }
 
@@ -474,10 +493,12 @@ kern_return_t thread_setstatus(
 		     */
 		    state->cs &= 0xffff;
 		    state->ss &= 0xffff;
+#if !defined(__x86_64__) || defined(USER32)
 		    state->ds &= 0xffff;
 		    state->es &= 0xffff;
 		    state->fs &= 0xffff;
 		    state->gs &= 0xffff;
+#endif
 
 		    if (state->cs == 0 || (state->cs & SEL_PL) != SEL_PL_U
 		     || state->ss == 0 || (state->ss & SEL_PL) != SEL_PL_U)
@@ -489,6 +510,27 @@ kern_return_t thread_setstatus(
 		/*
 		 * General registers
 		 */
+#if defined(__x86_64__) && !defined(USER32)
+		saved_state->r8 = state->r8;
+		saved_state->r9 = state->r9;
+		saved_state->r10 = state->r10;
+		saved_state->r11 = state->r11;
+		saved_state->r12 = state->r12;
+		saved_state->r13 = state->r13;
+		saved_state->r14 = state->r14;
+		saved_state->r15 = state->r15;
+		saved_state->edi = state->rdi;
+		saved_state->esi = state->rsi;
+		saved_state->ebp = state->rbp;
+		saved_state->uesp = state->ursp;
+		saved_state->ebx = state->rbx;
+		saved_state->edx = state->rdx;
+		saved_state->ecx = state->rcx;
+		saved_state->eax = state->rax;
+		saved_state->eip = state->rip;
+		saved_state->efl = (state->rfl & ~EFL_USER_CLEAR)
+				    | EFL_USER_SET;
+#else
 		saved_state->edi = state->edi;
 		saved_state->esi = state->esi;
 		saved_state->ebp = state->ebp;
@@ -500,11 +542,13 @@ kern_return_t thread_setstatus(
 		saved_state->eip = state->eip;
 		saved_state->efl = (state->efl & ~EFL_USER_CLEAR)
 				    | EFL_USER_SET;
+#endif /* __x86_64__ && !USER32 */
 
+#if !defined(__x86_64__) || defined(USER32)
 		/*
 		 * Segment registers.  Set differently in V8086 mode.
 		 */
-		if (state->efl & EFL_VM) {
+		if (saved_state->efl & EFL_VM) {
 		    /*
 		     * Set V8086 mode segment registers.
 		     */
@@ -528,20 +572,23 @@ kern_return_t thread_setstatus(
 			 * Hardware assist on.
 			 */
 			thread->pcb->ims.v86s.flags =
-			    state->efl & (EFL_TF | EFL_IF);
+			    saved_state->efl & (EFL_TF | EFL_IF);
 		    }
-		}
-		else if (flavor == i386_THREAD_STATE) {
+		} else
+#endif
+		if (flavor == i386_THREAD_STATE) {
 		    /*
 		     * 386 mode.  Set segment registers for flat
 		     * 32-bit address space.
 		     */
 		    saved_state->cs = USER_CS;
 		    saved_state->ss = USER_DS;
+#if !defined(__x86_64__) || defined(USER32)
 		    saved_state->ds = USER_DS;
 		    saved_state->es = USER_DS;
 		    saved_state->fs = USER_DS;
 		    saved_state->gs = USER_DS;
+#endif
 		}
 		else {
 		    /*
@@ -552,10 +599,12 @@ kern_return_t thread_setstatus(
 		     */
 		    saved_state->cs = state->cs;
 		    saved_state->ss = state->ss;
+#if !defined(__x86_64__) || defined(USER32)
 		    saved_state->ds = state->ds;
 		    saved_state->es = state->es;
 		    saved_state->fs = state->fs;
 		    saved_state->gs = state->gs;
+#endif
 		}
 		break;
 	    }
@@ -565,8 +614,22 @@ kern_return_t thread_setstatus(
 		if (count < i386_FLOAT_STATE_COUNT)
 			return(KERN_INVALID_ARGUMENT);
 
-		return fpu_set_state(thread,
-				(struct i386_float_state *) tstate);
+		return fpu_set_state(thread, tstate, flavor);
+	    }
+
+	    case i386_XFLOAT_STATE: {
+
+	        vm_size_t xfp_size;
+		kern_return_t kr;
+		kr = i386_get_xstate_size(&realhost, &xfp_size);
+		if (kr != KERN_SUCCESS)
+			return kr;
+
+		xfp_size /= sizeof(integer_t);
+		if (count < xfp_size)
+			return(KERN_INVALID_ARGUMENT);
+
+		return fpu_set_state(thread, tstate, flavor);
 	    }
 
 	    /*
@@ -597,7 +660,7 @@ kern_return_t thread_setstatus(
 #endif
 		break;
 	    }
-
+#if !defined(__x86_64__) || defined(USER32)
 	    case i386_V86_ASSIST_STATE:
 	    {
 		struct i386_v86_assist_state *state;
@@ -611,10 +674,10 @@ kern_return_t thread_setstatus(
 		int_table = state->int_table;
 		int_count = state->int_count;
 
-		if (int_table >= VM_MAX_ADDRESS ||
+		if (int_table >= VM_MAX_USER_ADDRESS ||
 		    int_table +
 			int_count * sizeof(struct v86_interrupt_table)
-			    > VM_MAX_ADDRESS)
+			    > VM_MAX_USER_ADDRESS)
 		    return KERN_INVALID_ARGUMENT;
 
 		thread->pcb->ims.v86s.int_table = int_table;
@@ -624,7 +687,7 @@ kern_return_t thread_setstatus(
 			USER_REGS(thread)->efl & (EFL_TF | EFL_IF);
 		break;
 	    }
-
+#endif
 	    case i386_DEBUG_STATE:
 	    {
 		struct i386_debug_state *state;
@@ -639,7 +702,25 @@ kern_return_t thread_setstatus(
 			return ret;
 		break;
 	    }
+#if defined(__x86_64__) && !defined(USER32)
+	    case i386_FSGS_BASE_STATE:
+            {
+                    struct i386_fsgs_base_state *state;
+                    if (count < i386_FSGS_BASE_STATE_COUNT)
+                            return KERN_INVALID_ARGUMENT;
 
+                    state = (struct i386_fsgs_base_state *) tstate;
+                    if (state->gs_base & 0x8000000000000000UL)
+                            printf("WARNING: negative gs base not allowed\n");
+                    thread->pcb->ims.sbs.fsbase = state->fs_base;
+                    thread->pcb->ims.sbs.gsbase = state->gs_base & 0x7fffffffffffffffUL;
+                    if (thread == current_thread()) {
+                            wrmsr(MSR_REG_FSBASE, state->fs_base);
+                            wrmsr(MSR_REG_KGSBASE, state->gs_base);
+                    }
+                    break;
+            }
+#endif
 	    default:
 		return(KERN_INVALID_ARGUMENT);
 	}
@@ -661,14 +742,23 @@ kern_return_t thread_getstatus(
 {
 	switch (flavor)  {
 	    case THREAD_STATE_FLAVOR_LIST:
-		if (*count < 4)
+	    {
+#if !defined(__x86_64__) || defined(USER32)
+		unsigned int ncount = 4;
+#else
+		unsigned int ncount = 3;
+#endif
+		if (*count < ncount)
 		    return (KERN_INVALID_ARGUMENT);
 		tstate[0] = i386_THREAD_STATE;
 		tstate[1] = i386_FLOAT_STATE;
 		tstate[2] = i386_ISA_PORT_MAP_STATE;
+#if !defined(__x86_64__) || defined(USER32)
 		tstate[3] = i386_V86_ASSIST_STATE;
-		*count = 4;
+#endif
+		*count = ncount;
 		break;
+	    }
 
 	    case i386_THREAD_STATE:
 	    case i386_REGS_SEGS_STATE:
@@ -685,6 +775,27 @@ kern_return_t thread_getstatus(
 		/*
 		 * General registers.
 		 */
+#if defined(__x86_64__) && !defined(USER32)
+		state->r8 = saved_state->r8;
+		state->r9 = saved_state->r9;
+		state->r10 = saved_state->r10;
+		state->r11 = saved_state->r11;
+		state->r12 = saved_state->r12;
+		state->r13 = saved_state->r13;
+		state->r14 = saved_state->r14;
+		state->r15 = saved_state->r15;
+		state->rdi = saved_state->edi;
+		state->rsi = saved_state->esi;
+		state->rbp = saved_state->ebp;
+		state->rbx = saved_state->ebx;
+		state->rdx = saved_state->edx;
+		state->rcx = saved_state->ecx;
+		state->rax = saved_state->eax;
+		state->rip = saved_state->eip;
+		state->ursp = saved_state->uesp;
+		state->rfl = saved_state->efl;
+		state->rsp = 0;	/* unused */
+#else
 		state->edi = saved_state->edi;
 		state->esi = saved_state->esi;
 		state->ebp = saved_state->ebp;
@@ -693,11 +804,14 @@ kern_return_t thread_getstatus(
 		state->ecx = saved_state->ecx;
 		state->eax = saved_state->eax;
 		state->eip = saved_state->eip;
-		state->efl = saved_state->efl;
 		state->uesp = saved_state->uesp;
+		state->efl = saved_state->efl;
+		state->esp = 0;	/* unused */
+#endif /* __x86_64__ && !USER32 */
 
 		state->cs = saved_state->cs;
 		state->ss = saved_state->ss;
+#if !defined(__x86_64__) || defined(USER32)
 		if (saved_state->efl & EFL_VM) {
 		    /*
 		     * V8086 mode.
@@ -714,10 +828,9 @@ kern_return_t thread_getstatus(
 			if ((thread->pcb->ims.v86s.flags &
 					(EFL_IF|V86_IF_PENDING))
 				== 0)
-			    state->efl &= ~EFL_IF;
+			    saved_state->efl &= ~EFL_IF;
 		    }
-		}
-		else {
+		} else {
 		    /*
 		     * 386 mode.
 		     */
@@ -726,6 +839,7 @@ kern_return_t thread_getstatus(
 		    state->fs = saved_state->fs & 0xffff;
 		    state->gs = saved_state->gs & 0xffff;
 		}
+#endif
 		*count = i386_THREAD_STATE_COUNT;
 		break;
 	    }
@@ -736,8 +850,23 @@ kern_return_t thread_getstatus(
 			return(KERN_INVALID_ARGUMENT);
 
 		*count = i386_FLOAT_STATE_COUNT;
-		return fpu_get_state(thread,
-				(struct i386_float_state *)tstate);
+		return fpu_get_state(thread, tstate, flavor);
+	    }
+
+	    case i386_XFLOAT_STATE: {
+
+		vm_size_t xfp_size;
+		kern_return_t kr;
+		kr = i386_get_xstate_size(&realhost, &xfp_size);
+		if (kr != KERN_SUCCESS)
+			return kr;
+
+		xfp_size /= sizeof(integer_t);
+		if (*count < xfp_size)
+			return(KERN_INVALID_ARGUMENT);
+
+		*count = xfp_size;
+		return fpu_get_state(thread, tstate, flavor);
 	    }
 
 	    /*
@@ -763,7 +892,7 @@ kern_return_t thread_getstatus(
 		*count = i386_ISA_PORT_MAP_STATE_COUNT;
 		break;
 	    }
-
+#if !defined(__x86_64__) || defined(USER32)
 	    case i386_V86_ASSIST_STATE:
 	    {
 		struct i386_v86_assist_state *state;
@@ -778,7 +907,7 @@ kern_return_t thread_getstatus(
 		*count = i386_V86_ASSIST_STATE_COUNT;
 		break;
 	    }
-
+#endif
 	    case i386_DEBUG_STATE:
 	    {
 		struct i386_debug_state *state;
@@ -792,7 +921,20 @@ kern_return_t thread_getstatus(
 		*count = i386_DEBUG_STATE_COUNT;
 		break;
 	    }
+#if defined(__x86_64__) && !defined(USER32)
+	    case i386_FSGS_BASE_STATE:
+            {
+                    struct i386_fsgs_base_state *state;
+                    if (*count < i386_FSGS_BASE_STATE_COUNT)
+                            return KERN_INVALID_ARGUMENT;
 
+                    state = (struct i386_fsgs_base_state *) tstate;
+                    state->fs_base = thread->pcb->ims.sbs.fsbase;
+                    state->gs_base = thread->pcb->ims.sbs.gsbase;
+                    *count = i386_FSGS_BASE_STATE_COUNT;
+                    break;
+            }
+#endif
 	    default:
 		return(KERN_INVALID_ARGUMENT);
 	}
@@ -822,27 +964,28 @@ thread_set_syscall_return(
 vm_offset_t
 user_stack_low(vm_size_t stack_size)
 {
-	return (VM_MAX_ADDRESS - stack_size);
+	return (VM_MAX_USER_ADDRESS - stack_size);
 }
 
 /*
  * Allocate argument area and set registers for first user thread.
  */
 vm_offset_t
-set_user_regs(stack_base, stack_size, exec_info, arg_size)
-	vm_offset_t	stack_base;	/* low address */
-	vm_offset_t	stack_size;
-	const struct exec_info *exec_info;
-	vm_size_t	arg_size;
+set_user_regs(vm_offset_t stack_base, /* low address */
+	      vm_offset_t stack_size,
+	      const struct exec_info *exec_info,
+	      vm_size_t arg_size)
 {
 	vm_offset_t	arg_addr;
 	struct i386_saved_state *saved_state;
 
-	arg_size = (arg_size + sizeof(int) - 1) & ~(sizeof(int)-1);
+	assert(P2ALIGNED(stack_size, USER_STACK_ALIGN));
+	assert(P2ALIGNED(stack_base, USER_STACK_ALIGN));
+	arg_size = P2ROUND(arg_size, USER_STACK_ALIGN);
 	arg_addr = stack_base + stack_size - arg_size;
 
 	saved_state = USER_REGS(current_thread());
-	saved_state->uesp = (long)arg_addr;
+	saved_state->uesp = (rpc_vm_offset_t)arg_addr;
 	saved_state->eip = exec_info->entry;
 
 	return (arg_addr);

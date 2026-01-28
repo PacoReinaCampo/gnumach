@@ -34,29 +34,15 @@
 #include <device/buf.h>
 #include <device/if_hdr.h>
 #include <device/if_ether.h>
+#include <device/subrs.h>
 
 
-
-/*
- * Print out disk name and block number for hard disk errors.
- */
-void harderr(ior, cp)
-	const io_req_t ior;
-	const char *	cp;
-{
-	printf("%s%d%c: hard error sn%d ",
-	       cp,
-	       minor(ior->io_unit) >> 3,
-	       'a' + (minor(ior->io_unit) & 0x7),
-	       ior->io_recnum);
-}
 
 /*
  * Convert Ethernet address to printable (loggable) representation.
  */
 char *
-ether_sprintf(ap)
-	const u_char *ap;
+ether_sprintf(const u_char *ap)
 {
 	int i;
 	static char etherbuf[18];
@@ -88,50 +74,13 @@ void if_init_queues(struct ifnet *ifp)
 /*
  * Compatibility with BSD device drivers.
  */
-void sleep(channel, priority)
-	vm_offset_t	channel;
-	int		priority;
+void sleep(vm_offset_t channel, int priority)
 {
 	assert_wait((event_t) channel, FALSE);	/* not interruptible XXX */
 	thread_block((void (*)()) 0);
 }
 
-void wakeup(channel)
-	vm_offset_t	channel;
+void wakeup(vm_offset_t channel)
 {
 	thread_wakeup((event_t) channel);
-}
-
-io_req_t
-geteblk(size)
-	int	size;
-{
-	io_req_t	ior;
-
-	io_req_alloc(ior, 0);
-	ior->io_device = (mach_device_t)0;
-	ior->io_unit = 0;
-	ior->io_op = 0;
-	ior->io_mode = 0;
-	ior->io_recnum = 0;
-	ior->io_count = size;
-	ior->io_residual = 0;
-	ior->io_error = 0;
-
-	size = round_page(size);
-	ior->io_alloc_size = size;
-	if (kmem_alloc(kernel_map, (vm_offset_t *)&ior->io_data, size)
-		!= KERN_SUCCESS)
-		    panic("geteblk");
-
-	return (ior);
-}
-
-void brelse(ior)
-	io_req_t ior;
-{
-	(void) vm_deallocate(kernel_map,
-			(vm_offset_t) ior->io_data,
-			ior->io_alloc_size);
-	io_req_free(ior);
 }

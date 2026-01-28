@@ -40,7 +40,6 @@
  *	a set of reasons for an AST, and passing this set to ast_taken.
  */
 
-#include "cpu_number.h"
 #include <kern/kern_types.h>
 #include <kern/macros.h>
 #include <machine/ast.h>
@@ -133,6 +132,7 @@ extern void ast_init (void);
 extern void ast_check (void);
 
 #if	NCPUS > 1
+extern void init_ast_check(const processor_t processor);
 extern void cause_ast_check(const processor_t processor);
 #endif
 

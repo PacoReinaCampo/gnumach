@@ -54,6 +54,7 @@ typedef	mach_port_t	device_t;
  * Device name string
  */
 typedef	char	dev_name_t[128];	/* must match device_types.defs */
+typedef	const char	*const_dev_name_t;
 
 /*
  * Mode for open/read/write
@@ -68,12 +69,14 @@ typedef unsigned int	dev_mode_t;
  * IO buffer - out-of-line array of characters.
  */
 typedef char *	io_buf_ptr_t;
+typedef const char *	const_io_buf_ptr_t;
 
 /*
  * IO buffer - in-line array of characters.
  */
 #define IO_INBAND_MAX (128)		/* must match device_types.defs */
 typedef char 	io_buf_ptr_inband_t[IO_INBAND_MAX];
+typedef const char 	*const_io_buf_ptr_inband_t;
 
 /*
  * IO buffer vector - for scatter/gather IO.
@@ -82,11 +85,16 @@ typedef struct {
 	vm_offset_t	data;
 	vm_size_t	count;
 } io_buf_vec_t;
+typedef struct {
+	rpc_vm_offset_t	data;
+	rpc_vm_size_t	count;
+} rpc_io_buf_vec_t;
 
 /*
  * Record number for random-access devices
  */
-typedef	unsigned int	recnum_t;
+typedef	long_natural_t recnum_t;
+typedef rpc_long_natural_t rpc_recnum_t;
 
 /*
  * Flavors of set/get statuses
@@ -115,6 +123,8 @@ typedef int		dev_status_data_t[DEV_STATUS_MAX];
 #	define	DEV_GET_RECORDS_DEVICE_RECORDS	0	/* 0 if unknown */
 #	define	DEV_GET_RECORDS_RECORD_SIZE	1	/* 1 if sequential */
 #define	DEV_GET_RECORDS_COUNT		2
+
+#define	DEV_FLUSH_CACHE		2
 
 /*
  * Device error codes

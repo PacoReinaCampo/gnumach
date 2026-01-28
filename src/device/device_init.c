@@ -38,6 +38,7 @@
 #include <device/device_types.h>
 #include <device/device_port.h>
 #include <device/tty.h>
+#include <device/device_init.h>
 #include <device/ds_routines.h>
 #include <device/net_io.h>
 #include <device/chario.h>
@@ -61,6 +62,6 @@ device_service_create(void)
 	device_pager_init();
 	chario_init();
 
-	(void) kernel_thread(kernel_task, io_done_thread, 0);
-	(void) kernel_thread(kernel_task, net_thread, 0);
+	(void) kernel_thread(kernel_task, "io_done", io_done_thread, 0);
+	(void) kernel_thread(kernel_task, "net", net_thread, 0);
 }

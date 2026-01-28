@@ -67,19 +67,15 @@ char *  db_history_prev = (char *) 0;	/* start of previous line */
 #define	BLANK		' '
 #define	BACKUP		'\b'
 
-void
-db_putstring(s, count)
-	const char	*s;
-	int		count;
+static void
+db_putstring(const char *s, int count)
 {
 	while (--count >= 0)
 	    cnputc(*s++);
 }
 
-void
-db_putnchars(c, count)
-	int	c;
-	int	count;
+static void
+db_putnchars(int c, int count)
 {
 	while (--count >= 0)
 	    cnputc(c);
@@ -90,7 +86,7 @@ db_putnchars(c, count)
  */
 #define	DEL_FWD		0
 #define	DEL_BWD		1
-void
+static void
 db_delete(
 	int	n,
 	int	bwd)
@@ -110,7 +106,7 @@ db_delete(
 	db_le -= n;
 }
 
-void
+static void
 db_delete_line(void)
 {
 	db_delete(db_le - db_lc, DEL_FWD);
@@ -136,11 +132,17 @@ db_delete_line(void)
 #endif /* DB_HISTORY_SIZE */
 
 /* returns TRUE at end-of-line */
-boolean_t
+static boolean_t
 db_inputchar(int c)
 {
+	static int escaped, csi;
+	int was_escaped = escaped, was_csi = csi;
+	escaped = 0;
+	csi = 0;
+
 	switch (c) {
 	    case CTRL('b'):
+	    left:
 		/* back up one character */
 		if (db_lc > db_lbuf_start) {
 		    cnputc(BACKUP);
@@ -148,6 +150,7 @@ db_inputchar(int c)
 		}
 		break;
 	    case CTRL('f'):
+	    right:
 		/* forward one character */
 		if (db_lc < db_le) {
 		    cnputc(*db_lc);
@@ -202,6 +205,7 @@ db_inputchar(int c)
 		break;
 #if DB_HISTORY_SIZE != 0
 	    case CTRL('p'):
+	    up:
 	        DEC_DB_CURR();
 	        while (db_history_curr != db_history_last) {
 			DEC_DB_CURR();
@@ -227,6 +231,7 @@ db_inputchar(int c)
 		db_putstring(db_lbuf_start, db_le - db_lbuf_start);
 		break;
 	    case CTRL('n'):
+	    down:
 	        while (db_history_curr != db_history_last) {
 			if (*db_history_curr == '\0')
 			    break;
@@ -306,7 +311,49 @@ db_inputchar(int c)
 #endif /* DB_HISTORY_SIZE */
 		*db_le++ = c;
 		return (TRUE);
+	    case '\033':
+		escaped = 1;
+		break;
+	    case '[':
+		if (was_escaped)
+		    csi = 1;
+		else
+		    goto plain;
+		break;
+	    case 'A':
+		if (was_csi)
+		    goto up;
+		else
+		    goto plain;
+	    case 'B':
+		if (was_csi)
+		    goto down;
+		else
+		    goto plain;
+	    case 'C':
+		if (was_csi)
+		    goto right;
+		else
+		    goto plain;
+	    case 'D':
+		if (was_csi)
+		    goto left;
+		else
+		    goto plain;
+
 	    default:
+	    plain:
+		if (was_csi) {
+			if (c == '?' || c == '<' || (c >= '0' && c <= '9') || c == ';') {
+				/* Still in CSI */
+				csi = 1;
+				break;
+			}
+			if (c >= '@' && c <= '~')
+				/* Unsupported sequence, silently drop */
+				break;
+			/* Odd sequence, print it */
+		}
 		if (db_le == db_lbuf_end) {
 		    cnputc('\007');
 		}

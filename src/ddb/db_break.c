@@ -61,8 +61,8 @@ static db_thread_breakpoint_t		db_free_thread_break_list = 0;
 static boolean_t			db_thread_break_init = FALSE;
 static int				db_breakpoint_number = 0;
 
-db_breakpoint_t
-db_breakpoint_alloc()
+static db_breakpoint_t
+db_breakpoint_alloc(void)
 {
 	db_breakpoint_t	bkpt;
 
@@ -80,20 +80,19 @@ db_breakpoint_alloc()
 	return (bkpt);
 }
 
-void
-db_breakpoint_free(bkpt)
-	db_breakpoint_t	bkpt;
+static void
+db_breakpoint_free(db_breakpoint_t bkpt)
 {
 	bkpt->link = db_free_breakpoints;
 	db_free_breakpoints = bkpt;
 }
 
 static int
-db_add_thread_breakpoint(bkpt, task_thd, count, task_bpt)
-	const db_breakpoint_t bkpt;
-	vm_offset_t task_thd;
-	int count;
-	boolean_t task_bpt;
+db_add_thread_breakpoint(
+	const db_breakpoint_t bkpt,
+	vm_offset_t task_thd,
+	int count,
+	boolean_t task_bpt)
 {
 	db_thread_breakpoint_t tp;
 
@@ -155,9 +154,9 @@ db_delete_thread_breakpoint(
 }
 
 static db_thread_breakpoint_t __attribute__ ((pure))
-db_find_thread_breakpoint(bkpt, thread)
-	const db_breakpoint_t bkpt;
-	const thread_t thread;
+db_find_thread_breakpoint(
+	const db_breakpoint_t bkpt,
+	const thread_t thread)
 {
 	db_thread_breakpoint_t tp;
 	task_t task = (thread == THREAD_NULL)? TASK_NULL: thread->task;
@@ -175,9 +174,9 @@ db_find_thread_breakpoint(bkpt, thread)
 }
 
 db_thread_breakpoint_t
-db_find_thread_breakpoint_here(task, addr)
-	const task_t	task;
-	db_addr_t	addr;
+db_find_thread_breakpoint_here(
+	const task_t	task,
+	db_addr_t	addr)
 {
 	db_breakpoint_t bkpt;
 
@@ -267,12 +266,12 @@ db_check_breakpoint_valid(void)
 }
 
 db_breakpoint_t
-db_set_breakpoint(task, addr, count, thread, task_bpt)
-	const task_t	task;
-	db_addr_t	addr;
-	int		count;
-	const thread_t	thread;
-	boolean_t	task_bpt;
+db_set_breakpoint(
+	const task_t	task,
+	db_addr_t	addr,
+	int		count,
+	const thread_t	thread,
+	boolean_t	task_bpt)
 {
 	db_breakpoint_t bkpt;
 	db_breakpoint_t alloc_bkpt = 0;
@@ -319,11 +318,11 @@ db_set_breakpoint(task, addr, count, thread, task_bpt)
 	}
 }
 
-void
-db_delete_breakpoint(task, addr, task_thd)
-	const task_t	task;
-	db_addr_t	addr;
-	vm_offset_t	task_thd;
+static void
+db_delete_breakpoint(
+	const task_t	task,
+	db_addr_t	addr,
+	vm_offset_t	task_thd)
 {
 	db_breakpoint_t	bkpt;
 	db_breakpoint_t	*prev;
@@ -351,9 +350,9 @@ db_delete_breakpoint(task, addr, task_thd)
 }
 
 db_breakpoint_t __attribute__ ((pure))
-db_find_breakpoint(task, addr)
-	const task_t	task;
-	db_addr_t	addr;
+db_find_breakpoint(
+	const task_t	task,
+	db_addr_t	addr)
 {
 	db_breakpoint_t	bkpt;
 
@@ -367,9 +366,9 @@ db_find_breakpoint(task, addr)
 }
 
 boolean_t
-db_find_breakpoint_here(task, addr)
-	const task_t	task;
-	db_addr_t	addr;
+db_find_breakpoint_here(
+	const task_t	task,
+	db_addr_t	addr)
 {
 	db_breakpoint_t	bkpt;
 
@@ -523,7 +522,7 @@ db_delete_temp_breakpoint(
 /*
  * List breakpoints.
  */
-void
+static void
 db_list_breakpoints(void)
 {
 	db_breakpoint_t	bkpt;
@@ -598,7 +597,11 @@ db_list_breakpoints(void)
 /* Delete breakpoint */
 /*ARGSUSED*/
 void
-db_delete_cmd(void)
+db_delete_cmd(
+	db_expr_t	addr_,
+	int		have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	int n;
 	thread_t thread;
@@ -677,11 +680,11 @@ db_delete_cmd(void)
 /* Set breakpoint with skip count */
 /*ARGSUSED*/
 void
-db_breakpoint_cmd(addr, have_addr, count, modif)
-	db_expr_t	addr;
-	int		have_addr;
-	db_expr_t	count;
-	const char *	modif;
+db_breakpoint_cmd(
+	db_expr_t	addr,
+	int		have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	int n;
 	thread_t thread;
@@ -731,7 +734,11 @@ db_breakpoint_cmd(addr, have_addr, count, modif)
 
 /* list breakpoints */
 void
-db_listbreak_cmd(void)
+db_listbreak_cmd(
+	db_expr_t	addr,
+	int		have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	db_list_breakpoints();
 }

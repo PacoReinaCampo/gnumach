@@ -36,6 +36,8 @@
 
 #include <string.h>
 
+#include <machine/smp.h>
+
 #include <kern/debug.h>
 #include <kern/lock.h>
 #include <kern/thread.h>
@@ -88,7 +90,7 @@ void simple_lock_init(simple_lock_t l)
 void simple_lock(simple_lock_t l)
 {
 	while (test_and_set((boolean_t *)l))
-		continue;
+		cpu_pause();
 }
 
 void simple_unlock(simple_lock_t l)
@@ -202,7 +204,7 @@ boolean_t _simple_lock_try(
 	return TRUE;
 }
 
-void simple_unlock(
+void _simple_unlock(
 	simple_lock_t l)
 {
 	assert(l->lock_data != 0);
@@ -290,7 +292,7 @@ void lock_write(
 		if ((i = lock_wait_time) > 0) {
 			simple_unlock(&l->interlock);
 			while (--i > 0 && l->want_write)
-				continue;
+				cpu_pause();
 			simple_lock(&l->interlock);
 		}
 
@@ -310,7 +312,7 @@ void lock_write(
 			simple_unlock(&l->interlock);
 			while (--i > 0 && (l->read_count != 0 ||
 					l->want_upgrade))
-				continue;
+				cpu_pause();
 			simple_lock(&l->interlock);
 		}
 
@@ -338,11 +340,16 @@ void lock_done(
 	if (l->recursion_depth != 0)
 		l->recursion_depth--;
 	else
-	if (l->want_upgrade)
+	if (l->want_upgrade) {
 	 	l->want_upgrade = FALSE;
-	else {
+#if MACH_LDEBUG
+		assert(l->writer == current_thread());
+		l->writer = THREAD_NULL;
+#endif	/* MACH_LDEBUG */
+	} else {
 	 	l->want_write = FALSE;
 #if MACH_LDEBUG
+		assert(l->writer == current_thread());
 		l->writer = THREAD_NULL;
 #endif	/* MACH_LDEBUG */
 	}
@@ -384,7 +391,7 @@ void lock_read(
 		if ((i = lock_wait_time) > 0) {
 			simple_unlock(&l->interlock);
 			while (--i > 0 && (l->want_write || l->want_upgrade))
-				continue;
+				cpu_pause();
 			simple_lock(&l->interlock);
 		}
 
@@ -450,7 +457,7 @@ boolean_t lock_read_to_write(
 		if ((i = lock_wait_time) > 0) {
 			simple_unlock(&l->interlock);
 			while (--i > 0 && l->read_count != 0)
-				continue;
+				cpu_pause();
 			simple_lock(&l->interlock);
 		}
 
@@ -492,6 +499,7 @@ void lock_write_to_read(
 	}
 
 #if MACH_LDEBUG
+	assert(l->writer == current_thread());
 	l->writer = THREAD_NULL;
 #endif	/* MACH_LDEBUG */
 	simple_unlock(&l->interlock);
@@ -664,14 +672,18 @@ void db_show_all_slocks(void)
 	for (i = 0; i < simple_locks_taken; i++) {
 		info = &simple_locks_info[i];
 		db_printf("%d: %s (", i, info->expr);
-		db_printsym(info->l, DB_STGY_ANY);
+		db_printsym((uintptr_t) info->l, DB_STGY_ANY);
 		db_printf(") locked by %s\n", info->loc);
 	}
 }
 #else	/* MACH_SLOCKS && NCPUS == 1 */
 void db_show_all_slocks(void)
 {
+#if	MACH_LOCK_MON
+	lip();
+#else
 	db_printf("simple lock info not available\n");
+#endif
 }
 #endif	/* MACH_SLOCKS && NCPUS == 1 */
 #endif	/* MACH_KDB */

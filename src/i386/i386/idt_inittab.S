@@ -27,6 +27,7 @@
 
 #include <i386/seg.h>
 #include <i386/i386asm.h>
+#include <i386/gdt.h>
 
 
 /* We'll be using macros to fill in a table in data hunk 2
@@ -133,7 +134,5 @@ EXCEPTION(0x1f,t_trap_1f)
 /* Terminator */
 	.data	2
 	.long	0
-#ifdef	MACH_PV_DESCRIPTORS
 	.long	0
-#endif	/* MACH_PV_DESCRIPTORS */
 

@@ -49,15 +49,15 @@
 #include <kern/timer.h>
 #include <kern/xpr.h>
 #include <kern/bootstrap.h>
-#include <kern/time_stamp.h>
 #include <kern/startup.h>
+#include <kern/printf.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
 #include <vm/vm_init.h>
 #include <vm/vm_pageout.h>
-#include <machine/machspl.h>
+#include <machine/spl.h>
 #include <machine/pcb.h>
 #include <machine/pmap.h>
 #include <machine/model_dep.h>
@@ -75,6 +75,7 @@ boolean_t reboot_on_panic = TRUE;
 
 #if	NCPUS > 1
 #include <machine/mp_desc.h>
+#include <kern/smp.h>
 #include <kern/machine.h>
 #endif	/* NCPUS > 1 */
 
@@ -131,8 +132,6 @@ void setup_main(void)
 	xprbootstrap();
 #endif	/* XPR_DEBUG */
 
-	timestamp_init();
-
 	machine_init();
 
 	mapable_time_init();
@@ -177,6 +176,7 @@ void setup_main(void)
 	 * Create the thread, and point it at the routine.
 	 */
 	(void) thread_create(kernel_task, &startup_thread);
+	thread_set_name(startup_thread, "startup");
 	thread_start(startup_thread, start_kernel_threads);
 
 	/*
@@ -217,8 +217,11 @@ void start_kernel_threads(void)
 	for (i = 0; i < NCPUS; i++) {
 	    if (machine_slot[i].is_cpu) {
 		thread_t	th;
+		char name[10];
 
 		(void) thread_create(kernel_task, &th);
+		snprintf(name, sizeof(name), "idle/%d", i);
+		thread_set_name(th, name);
 		thread_bind(th, cpu_to_processor(i));
 		thread_start(th, idle_thread);
 		thread_doswapin(th);
@@ -226,18 +229,18 @@ void start_kernel_threads(void)
 	    }
 	}
 
-	(void) kernel_thread(kernel_task, reaper_thread, (char *) 0);
-	(void) kernel_thread(kernel_task, swapin_thread, (char *) 0);
-	(void) kernel_thread(kernel_task, sched_thread, (char *) 0);
+	(void) kernel_thread(kernel_task, "reaper", reaper_thread, (char *) 0);
+	(void) kernel_thread(kernel_task, "swapin", swapin_thread, (char *) 0);
+	(void) kernel_thread(kernel_task, "sched", sched_thread, (char *) 0);
 #ifndef MACH_XEN
-	(void) kernel_thread(kernel_task, intr_thread, (char *)0);
+	(void) kernel_thread(kernel_task, "intr", intr_thread, (char *)0);
 #endif	/* MACH_XEN */
 
 #if	NCPUS > 1
 	/*
 	 *	Create the shutdown thread.
 	 */
-	(void) kernel_thread(kernel_task, action_thread, (char *) 0);
+	(void) kernel_thread(kernel_task, "action", action_thread, (char *) 0);
 
 	/*
 	 *	Allow other CPUs to run.
@@ -272,16 +275,10 @@ void start_kernel_threads(void)
 	 *	Become the pageout daemon.
 	 */
 	(void) spl0();
+	thread_set_name(current_thread(), "pageout");
 	vm_pageout();
 	/*NOTREACHED*/
 }
-
-#if	NCPUS > 1
-void slave_main(void)
-{
-	cpu_launch_first_thread(THREAD_NULL);
-}
-#endif	/* NCPUS > 1 */
 
 /*
  *	Start up the first thread on a CPU.
@@ -309,11 +306,14 @@ void cpu_launch_first_thread(thread_t th)
 
 	PMAP_ACTIVATE_KERNEL(mycpu);
 
-	active_threads[mycpu] = th;
-	active_stacks[mycpu] = th->kernel_stack;
+	percpu_assign(active_thread, th);
+	percpu_assign(active_stack, th->kernel_stack);
 	thread_lock(th);
 	th->state &= ~TH_UNINT;
 	thread_unlock(th);
+#if	NCPUS > 1
+	th->last_processor = cpu_to_processor(mycpu);
+#endif	/* NCPUS > 1 */
 	timer_switch(&th->system_timer);
 
 	PMAP_ACTIVATE_USER(vm_map_pmap(th->task->map), th, mycpu);

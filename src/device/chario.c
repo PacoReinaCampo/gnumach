@@ -34,7 +34,7 @@
 #include <mach/kern_return.h>
 #include <mach/mig_errors.h>
 #include <mach/vm_param.h>
-#include <machine/machspl.h>		/* spl definitions */
+#include <machine/spl.h>		/* spl definitions */
 
 #include <ipc/ipc_port.h>
 
@@ -157,8 +157,7 @@ io_return_t char_open(
 	spl_t	s;
 	io_return_t	rc = D_SUCCESS;
 
-	s = spltty();
-	simple_lock(&tp->t_lock);
+	s = simple_lock_irq(&tp->t_lock);
 
 	tp->t_dev = dev;
 
@@ -192,8 +191,7 @@ io_return_t char_open(
 	if (tp->t_mctl)
 		(*tp->t_mctl)(tp, TM_RTS, DMBIS);
 out:
-	simple_unlock(&tp->t_lock);
-	splx(s);
+	simple_unlock_irq(s, &tp->t_lock);
 	return rc;
 }
 
@@ -206,13 +204,12 @@ boolean_t char_open_done(
 	io_req_t	ior)
 {
 	struct tty *tp = (struct tty *)ior->io_dev_ptr;
-	spl_t s = spltty();
+	spl_t s;
 
-	simple_lock(&tp->t_lock);
+	s = simple_lock_irq(&tp->t_lock);
 	if ((tp->t_state & TS_ISOPEN) == 0) {
 	    queue_delayed_reply(&tp->t_delayed_open, ior, char_open_done);
-	    simple_unlock(&tp->t_lock);
-	    splx(s);
+	    simple_unlock_irq(s, &tp->t_lock);
 	    return FALSE;
 	}
 
@@ -222,15 +219,14 @@ boolean_t char_open_done(
 	if (tp->t_mctl)
 		(*tp->t_mctl)(tp, TM_RTS, DMBIS);
 
-	simple_unlock(&tp->t_lock);
-	splx(s);
+	simple_unlock_irq(s, &tp->t_lock);
 
 	ior->io_error = D_SUCCESS;
 	(void) ds_open_done(ior);
 	return TRUE;
 }
 
-boolean_t tty_close_open_reply(
+static boolean_t tty_close_open_reply(
 	io_req_t	ior)
 {
 	ior->io_error = D_DEVICE_DOWN;
@@ -277,8 +273,7 @@ io_return_t char_write(
 	/*
 	 * Check for tty operating.
 	 */
-	s = spltty();
-	simple_lock(&tp->t_lock);
+	s = simple_lock_irq(&tp->t_lock);
 
 	if ((tp->t_state & TS_CARR_ON) == 0) {
 
@@ -322,8 +317,7 @@ io_return_t char_write(
 	    rc = D_IO_QUEUED;
 	}
 out:
-	simple_unlock(&tp->t_lock);
-	splx(s);
+	simple_unlock_irq(s, &tp->t_lock);
 
 	if (!(ior->io_op & IO_INBAND))
 	    (void) vm_deallocate(device_io_map, addr, ior->io_count);
@@ -339,19 +333,17 @@ boolean_t char_write_done(
 	io_req_t	ior)
 {
 	struct tty *tp = (struct tty *)ior->io_dev_ptr;
-	spl_t s = spltty();
+	spl_t s;
 
-	simple_lock(&tp->t_lock);
+	s = simple_lock_irq(&tp->t_lock);
 	if (tp->t_outq.c_cc > TTHIWAT(tp) ||
 	    (tp->t_state & TS_CARR_ON) == 0) {
 
 	    queue_delayed_reply(&tp->t_delayed_write, ior, char_write_done);
-	    simple_unlock(&tp->t_lock);
-	    splx(s);
+	    simple_unlock_irq(s, &tp->t_lock);
 	    return FALSE;
 	}
-	simple_unlock(&tp->t_lock);
-	splx(s);
+	simple_unlock_irq(s, &tp->t_lock);
 
 	if (IP_VALID(ior->io_reply_port)) {
 	  (void) (*((ior->io_op & IO_INBAND) ?
@@ -366,7 +358,7 @@ boolean_t char_write_done(
 	return TRUE;
 }
 
-boolean_t tty_close_write_reply(
+static boolean_t tty_close_write_reply(
 	io_req_t	ior)
 {
 	ior->io_residual = ior->io_count;
@@ -394,8 +386,7 @@ io_return_t char_read(
 	if (rc != KERN_SUCCESS)
 	    return rc;
 
-	s = spltty();
-	simple_lock(&tp->t_lock);
+	s = simple_lock_irq(&tp->t_lock);
 	if ((tp->t_state & TS_CARR_ON) == 0) {
 
 	    if ((tp->t_state & TS_ONDELAY) == 0) {
@@ -431,8 +422,7 @@ io_return_t char_read(
 	}
 
     out:
-	simple_unlock(&tp->t_lock);
-	splx(s);
+	simple_unlock_irq(s, &tp->t_lock);
 	return rc;
 }
 
@@ -445,16 +435,15 @@ boolean_t char_read_done(
 	io_req_t	ior)
 {
 	struct tty *tp = (struct tty *)ior->io_dev_ptr;
-	spl_t s = spltty();
+	spl_t s;
 
-	simple_lock(&tp->t_lock);
+	s = simple_lock_irq(&tp->t_lock);
 
 	if (tp->t_inq.c_cc <= 0 ||
 	    (tp->t_state & TS_CARR_ON) == 0) {
 
 	    queue_delayed_reply(&tp->t_delayed_read, ior, char_read_done);
-	    simple_unlock(&tp->t_lock);
-	    splx(s);
+	    simple_unlock_irq(s, &tp->t_lock);
 	    return FALSE;
 	}
 
@@ -466,14 +455,13 @@ boolean_t char_read_done(
 	    tp->t_state &= ~TS_RTS_DOWN;
 	}
 
-	simple_unlock(&tp->t_lock);
-	splx(s);
+	simple_unlock_irq(s, &tp->t_lock);
 
 	(void) ds_read_done(ior);
 	return TRUE;
 }
 
-boolean_t tty_close_read_reply(
+static boolean_t tty_close_read_reply(
 	io_req_t	ior)
 {
 	ior->io_residual = ior->io_count;
@@ -524,7 +512,7 @@ void ttyclose(
 /*
  * Port-death routine to clean up reply messages.
  */
-boolean_t
+static boolean_t
 tty_queue_clean(
 	queue_t			q,
 	const ipc_port_t	port,
@@ -555,10 +543,10 @@ tty_portdeath(
 	struct tty *		tp,
 	const ipc_port_t	port)
 {
-	spl_t	spl = spltty();
+	spl_t	spl;
 	boolean_t	result;
 
-	simple_lock(&tp->t_lock);
+	spl = simple_lock_irq(&tp->t_lock);
 
 	/*
 	 * The queues may never have been initialized
@@ -575,8 +563,7 @@ tty_portdeath(
 	     || tty_queue_clean(&tp->t_delayed_open,  port,
 				tty_close_open_reply);
 	}
-	simple_unlock(&tp->t_lock);
-	splx(spl);
+	simple_unlock_irq(spl, &tp->t_lock);
 
 	return result;
 }
@@ -603,8 +590,7 @@ io_return_t tty_get_status(
                if (*count < TTY_STATUS_COUNT)
                    return (D_INVALID_OPERATION);
 
-		s = spltty();
-		simple_lock(&tp->t_lock);
+		s = simple_lock_irq(&tp->t_lock);
 
 		tsp->tt_ispeed = tp->t_ispeed;
 		tsp->tt_ospeed = tp->t_ospeed;
@@ -613,8 +599,7 @@ io_return_t tty_get_status(
 		if (tp->t_state & TS_HUPCLS)
 		    tsp->tt_flags |= TF_HUPCLS;
 
-		simple_unlock(&tp->t_lock);
-		splx(s);
+		simple_unlock_irq(s, &tp->t_lock);
 
 		*count = TTY_STATUS_COUNT;
 		break;
@@ -651,36 +636,30 @@ io_return_t tty_set_status(
 		if (flags == 0)
 		    flags = D_READ | D_WRITE;
 
-		s = spltty();
-		simple_lock(&tp->t_lock);
+		s = simple_lock_irq(&tp->t_lock);
 		tty_flush(tp, flags);
-		simple_unlock(&tp->t_lock);
-		splx(s);
+		simple_unlock_irq(s, &tp->t_lock);
 
 		break;
 	    }
 	    case TTY_STOP:
 		/* stop output */
-		s = spltty();
-		simple_lock(&tp->t_lock);
+		s = simple_lock_irq(&tp->t_lock);
 		if ((tp->t_state & TS_TTSTOP) == 0) {
 		    tp->t_state |= TS_TTSTOP;
 		    (*tp->t_stop)(tp, 0);
 		}
-		simple_unlock(&tp->t_lock);
-		splx(s);
+		simple_unlock_irq(s, &tp->t_lock);
 		break;
 
 	    case TTY_START:
 		/* start output */
-		s = spltty();
-		simple_lock(&tp->t_lock);
+		s = simple_lock_irq(&tp->t_lock);
 		if (tp->t_state & TS_TTSTOP) {
 		    tp->t_state &= ~TS_TTSTOP;
 		    tty_output(tp);
 		}
-		simple_unlock(&tp->t_lock);
-		splx(s);
+		simple_unlock_irq(s, &tp->t_lock);
 		break;
 
 	    case TTY_STATUS:
@@ -701,8 +680,7 @@ io_return_t tty_set_status(
 		    return D_INVALID_OPERATION;
 		}
 
-		s = spltty();
-		simple_lock(&tp->t_lock);
+		s = simple_lock_irq(&tp->t_lock);
 
 		tp->t_ispeed = tsp->tt_ispeed;
 		tp->t_ospeed = tsp->tt_ospeed;
@@ -711,8 +689,7 @@ io_return_t tty_set_status(
 		if (tsp->tt_flags & TF_HUPCLS)
 		    tp->t_state |= TS_HUPCLS;
 
-		simple_unlock(&tp->t_lock);
-		splx(s);
+		simple_unlock_irq(s, &tp->t_lock);
 		break;
 	    }
 	    default:
@@ -820,14 +797,12 @@ void ttrstrt(
 {
 	spl_t	s;
 
-	s = spltty();
-	simple_lock(&tp->t_lock);
+	s = simple_lock_irq(&tp->t_lock);
 
 	tp->t_state &= ~TS_TIMEOUT;
 	ttstart (tp);
 
-	simple_unlock(&tp->t_lock);
-        splx(s);
+	simple_unlock_irq(s, &tp->t_lock);
 }
 
 /*
@@ -882,14 +857,13 @@ void tty_output(
 /*
  * Send any buffered recvd chars up to user
  */
-void ttypush(
-	void * _tp)
+static void ttypush(void * _tp)
 {
 	struct tty	*tp = _tp;
-	spl_t	s = spltty();
+	spl_t	s;
 	int	state;
 
-	simple_lock(&tp->t_lock);
+	s = simple_lock_irq(&tp->t_lock);
 
 	/*
 	  The pdma timeout has gone off.
@@ -906,7 +880,7 @@ void ttypush(
 	    if (state & TS_MIN_TO_RCV)
 	      { /* a character was received */
 		tp->t_state = state & ~TS_MIN_TO_RCV;
-		timeout(ttypush, tp, pdma_timeouts[tp->t_ispeed]);
+		tp->t_timeout = timeout(ttypush, tp, pdma_timeouts[tp->t_ispeed]);
 	      }
 	    else
 	      {
@@ -920,8 +894,7 @@ void ttypush(
 	    tp->t_state = state & ~TS_MIN_TO_RCV;/* sanity */
 	  }
 
-	simple_unlock(&tp->t_lock);
-	splx(s);
+	simple_unlock_irq(s, &tp->t_lock);
 }
 
 /*
@@ -959,7 +932,7 @@ void ttyinput(
 	   */
 	  if (tp->t_state & TS_MIN_TO) {
 	    tp->t_state &= ~(TS_MIN_TO|TS_MIN_TO_RCV);
-	    untimeout(ttypush, tp);
+	    reset_timeout(tp->t_timeout);
 	  }
 	  tty_queue_completion(&tp->t_delayed_read);
       }
@@ -970,7 +943,7 @@ void ttyinput(
 	 * Otherwise set the character received during timeout interval
 	 * flag.
 	 * One alternative approach would be just to reset the timeout
-	 * into the future, but this involves making a timeout/untimeout
+	 * into the future, but this involves making a timeout/reset_timeout
 	 * call on every character.
 	 */
 	int ptime = pdma_timeouts[tp->t_ispeed];
@@ -979,7 +952,7 @@ void ttyinput(
 	    if ((tp->t_state & TS_MIN_TO) == 0)
 	      {
 		tp->t_state |= TS_MIN_TO;
-		timeout(ttypush, tp, ptime);
+		tp->t_timeout = timeout(ttypush, tp, ptime);
 	      }
 	    else
 	      {

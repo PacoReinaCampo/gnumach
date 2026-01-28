@@ -6,6 +6,7 @@
 #include <string.h>
 #include <kern/printf.h>
 #include "boot_script.h"
+#include "bootstrap.h"
 
 
 /* This structure describes a symbol.  */
@@ -547,7 +548,7 @@ boot_script_exec (void)
 	    {
 	      char *p, buf[50];
 	      int len;
-	      mach_port_t name;
+	      mach_port_name_t name;
 
 	      if (arg->type == VAL_SYM)
 		{
@@ -749,7 +750,7 @@ main (int argc, char **argv)
   char buf[500], *p;
   int len;
   FILE *fp;
-  mach_port_t host_port, device_port;
+  mach_port_name_t host_port, device_port;
 
   if (argc < 2)
     {

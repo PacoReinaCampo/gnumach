@@ -33,7 +33,7 @@
 #include <kern/xpr.h>
 #include <kern/lock.h>
 #include "cpu_number.h"
-#include <machine/machspl.h>
+#include <machine/spl.h>
 #include <vm/vm_kern.h>
 
 
@@ -46,7 +46,7 @@
  *	Just set xprenable false so the buffer isn't overwritten.
  */
 
-decl_simple_lock_data(,	xprlock)
+def_simple_lock_data(static,	xprlock)
 
 boolean_t xprenable = TRUE;	/* Enable xpr tracing */
 int nxprbufs = 0;	/* Number of contiguous xprbufs allocated */

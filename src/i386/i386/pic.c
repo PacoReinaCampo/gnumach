@@ -71,13 +71,19 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <kern/printf.h>
 #include <i386/ipl.h>
 #include <i386/pic.h>
-#include <i386/machspl.h>
+#include <i386/spl.h>
 #include <i386/pio.h>
+#include <device/irq_status.h>
 
-spl_t	curr_ipl;
+int	pic_mode = ACPI_PICMODE_PIC;
+
+spl_t	curr_ipl[NCPUS] = {0};
 int	curr_pic_mask;
+int	spl_init = 0;
 
 int	iunit[NINTR] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+
+struct irqinfo irqinfo[NINTR];
 
 unsigned short	master_icw, master_ocw, slaves_icw, slaves_ocw;
 
@@ -112,9 +118,14 @@ picinit(void)
 	/*
 	** 0. Initialise the current level to match cli() 
 	*/
+	int i;
 
-	curr_ipl = SPLHI;
+	for (i = 0; i < NCPUS; i++)
+		curr_ipl[i] = SPLHI;
 	curr_pic_mask = 0;
+
+	for (i = 0; i < NINTR; i++)
+		irqinfo[i].trigger = EDGE_TRIGGER;
 
 	/*
 	** 1. Generate addresses to each PIC port.
@@ -207,7 +218,7 @@ intnull(int unit_dev)
 /*
  * Mask a PIC IRQ.
  */
-inline void
+void
 mask_irq (unsigned int irq_nr)
 {
 	int new_pic_mask = curr_pic_mask | 1 << irq_nr;
@@ -229,7 +240,7 @@ mask_irq (unsigned int irq_nr)
 /*
  * Unmask a PIC IRQ.
  */
-inline void
+void
 unmask_irq (unsigned int irq_nr)
 {
 	int mask;

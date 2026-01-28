@@ -39,7 +39,7 @@
 /*
  * Routines placed in empty entries in the device tables
  */
-int nulldev(void)
+int nulldev_reset(dev_t dev)
 {
 	return (D_SUCCESS);
 }
@@ -65,12 +65,12 @@ int nulldev_write(dev_t dev, io_req_t ior)
 
 io_return_t nulldev_getstat(dev_t dev, dev_flavor_t flavor, dev_status_t data, mach_msg_type_number_t *count)
 {
-	return (D_SUCCESS);
+	return (D_INVALID_OPERATION);
 }
 
 io_return_t nulldev_setstat(dev_t dev, dev_flavor_t flavor, dev_status_t data, mach_msg_type_number_t count)
 {
-	return (D_SUCCESS);
+	return (D_INVALID_OPERATION);
 }
 
 int nulldev_portdeath(dev_t dev, mach_port_t port)
@@ -78,7 +78,12 @@ int nulldev_portdeath(dev_t dev, mach_port_t port)
 	return (D_SUCCESS);
 }
 
-int nodev(void)
+int nodev_async_in(dev_t dev, const ipc_port_t port, int x, filter_t* filter, unsigned int j)
+{
+	return (D_INVALID_OPERATION);
+}
+
+int nodev_info(dev_t dev, int a, int* b)
 {
 	return (D_INVALID_OPERATION);
 }
@@ -98,10 +103,9 @@ nomap(dev_t dev, vm_offset_t off, int prot)
  *   next character of target is 0 (end of string).
  */
 boolean_t __attribute__ ((pure))
-name_equal(src, len, target)
-	const char 	*src;
-	int		len;
-	const char 	*target;
+name_equal(const char 	*src,
+	int		len,
+	const char 	*target)
 {
 	while (--len >= 0)
 	    if (*src++ != *target++)
@@ -113,7 +117,7 @@ name_equal(src, len, target)
  * device name lookup
  */
 boolean_t dev_name_lookup(
-	char 		*name,
+	const char 		*name,
 	dev_ops_t	*ops,	/* out */
 	int		*unit)	/* out */
 {
@@ -129,7 +133,7 @@ boolean_t dev_name_lookup(
 	 * <partition>		is a letter in [a-h] (disks only?)
 	 */
 
-	char 		*cp = name;
+	const char 		*cp = name;
 	int		len;
 	int		j = 0;
 	int		c;
@@ -224,10 +228,7 @@ boolean_t dev_name_lookup(
  * Change an entry in the indirection list.
  */
 void
-dev_set_indirection(name, ops, unit)
-	const char	*name;
-	dev_ops_t	ops;
-	int		unit;
+dev_set_indirection(const char *name, dev_ops_t ops, int unit)
 {
 	dev_indirect_t di;
 
@@ -238,30 +239,4 @@ dev_set_indirection(name, ops, unit)
 		break;
 	    }
 	}
-}
-
-boolean_t dev_change_indirect(iname, dname, unit)
-	const char 	*iname;
-	const char	*dname;
-	int 		unit;
-{
-    struct dev_ops *dp;
-    struct dev_indirect *di;
-    boolean_t found = FALSE;
-
-    dev_search(dp) {
-	if (!strcmp(dp->d_name, dname)) {
-	    found = TRUE;
-	    break;
-	}
-    }
-    if (!found) return FALSE;
-    dev_indirect_search(di) {
-	if (!strcmp(di->d_name, iname)) {
-	    di->d_ops = dp;
-	    di->d_unit = unit;
-	    return TRUE;
-	}
-    }
-    return FALSE;
 }

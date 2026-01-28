@@ -42,7 +42,7 @@
 #include <kern/ipc_sched.h>
 #include <kern/task.h>
 #include <kern/thread.h>
-#include <machine/machspl.h>	/* for splsched */
+#include <machine/spl.h>	/* for splsched */
 
 #if	MACH_FIXPRI
 #include <mach/policy.h>
@@ -61,7 +61,7 @@
  *	returned, the thread should make one more check on the
  *	lock and then be a good citizen and really suspend.
  */
-void swtch_continue(void)
+static void swtch_continue(void)
 {
 	processor_t	myprocessor;
 
@@ -89,7 +89,7 @@ boolean_t swtch(void)
 	       myprocessor->processor_set->runq.count > 0);
 }
 
-void swtch_pri_continue(void)
+static void swtch_pri_continue(void)
 {
 	thread_t	thread = current_thread();
 	processor_t	myprocessor;
@@ -130,7 +130,7 @@ boolean_t  swtch_pri(int pri)
 	       myprocessor->processor_set->runq.count > 0);
 }
 
-void thread_switch_continue(void)
+static void thread_switch_continue(void)
 {
 	thread_t	cur_thread = current_thread();
 
@@ -152,8 +152,8 @@ void thread_switch_continue(void)
  *	even if that violates priority order.
  */
 kern_return_t thread_switch(
-	mach_port_t 		thread_name,
-	int 			option,
+	mach_port_name_t 	thread_name,
+	int					option,
 	mach_msg_timeout_t 	option_time)
 {
     thread_t			cur_thread = current_thread();

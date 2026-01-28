@@ -45,20 +45,20 @@
 #include <mach/boolean.h>
 #include <kern/thread.h>
 #include <kern/lock.h>
-#include <kern/time_stamp.h>
+#include <kern/printf.h>
+#include <kern/mach_clock.h>
+#include <machine/ipl.h>
+#include <ddb/db_sym.h>
+#include <ddb/db_output.h>
 
-
-decl_simple_lock_data(extern , kdb_lock)
-decl_simple_lock_data(extern , printf_lock)
+def_simple_lock_data(, kdb_lock)
+def_simple_lock_data(, printf_lock)
 
 #if	NCPUS > 1 && MACH_LOCK_MON
-
-#if	TIME_STAMP
-extern	time_stamp_t time_stamp;
-#else	/* TIME_STAMP */
+#define TIME_STAMP 1
 typedef unsigned int time_stamp_t;
-#define	time_stamp 0
-#endif	/* TIME_STAMP */
+/* in milliseconds */
+#define	time_stamp (elapsed_ticks * 1000 / hz)
 
 #define LOCK_INFO_MAX	     (1024*32)
 #define LOCK_INFO_HASH_COUNT 1024
@@ -80,6 +80,8 @@ struct lock_info_bucket {
 	struct lock_info info[LOCK_INFO_PER_BUCKET];
 };
 
+static void print_lock_info(struct lock_info *li);
+
 struct lock_info_bucket lock_info[LOCK_INFO_HASH_COUNT];
 struct lock_info default_lock_info;
 unsigned default_lock_stack = 0;
@@ -94,7 +96,6 @@ decl_simple_lock_data(, **lock)
 {
 	struct lock_info *li =  &(lock_info[HASH_LOCK(*lock)].info[0]);
 	int i;
-	my_cpu = cpu_number();
 
 	for (i=0; i < LOCK_INFO_PER_BUCKET; i++, li++)
 		if (li->lock) {
@@ -115,7 +116,7 @@ void simple_lock(lock)
 decl_simple_lock_data(, *lock)
 {
 	struct lock_info *li = locate_lock_info(&lock);
-	my_cpu = cpu_number();
+	int my_cpu = cpu_number();
 
 	if (current_thread())
 		li->stack = current_thread()->lock_stack++;
@@ -134,7 +135,7 @@ int simple_lock_try(lock)
 decl_simple_lock_data(, *lock)
 {
 	struct lock_info *li = locate_lock_info(&lock);
-	my_cpu = cpu_number();
+	int my_cpu = cpu_number();
 
 	if (curr_ipl[my_cpu])
 		li->masked++;
@@ -166,13 +167,7 @@ decl_simple_lock_data(, *lock)
 	}
 }
 
-void lip(void) {
-	lis(4, 1, 0);
-}
-
-#define lock_info_sort lis
-
-void lock_info_sort(arg, abs, count)
+static void lock_info_sort(int arg, int abs, int count)
 {
 	struct lock_info *li, mean;
 	int bucket = 0;
@@ -248,6 +243,10 @@ void lock_info_sort(arg, abs, count)
 	print_lock_info(&mean);
 }
 
+void lip(void) {
+	lock_info_sort(4, 1, 0);
+}
+
 #define lock_info_clear lic
 
 void lock_info_clear(void)
@@ -264,19 +263,18 @@ void lock_info_clear(void)
 	memset(&default_lock_info, 0, sizeof(struct lock_info));
 }
 
-void print_lock_info(li)
-struct lock_info *li;
+static void print_lock_info(struct lock_info *li)
 {
-	int off;
+	db_addr_t off;
 	int sum = li->success + li->fail;
 	db_printf("%d	%d/%d	%d/%d	%d/%d	%d/%d	", li->success,
 		   li->fail, (li->fail*100)/sum,
 		   li->masked, (li->masked*100)/sum,
 		   li->stack, li->stack/sum,
 		   li->time, li->time/sum);
-	db_free_symbol(db_search_symbol(li->lock, 0, &off));
+	db_free_symbol(db_search_symbol((db_addr_t) li->lock, 0, &off));
 	if (off < 1024)
-		db_printsym(li->lock, 0);
+		db_printsym((db_addr_t) li->lock, 0);
 	else {
 		db_printsym(li->caller, 0);
 		db_printf("(%X)", li->lock);

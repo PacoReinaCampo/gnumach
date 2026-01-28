@@ -23,33 +23,6 @@
 #ifndef _MACH_I386_MULTIBOOT_H_
 #define _MACH_I386_MULTIBOOT_H_
 
-#include <mach/machine/vm_types.h>
-
-/* For a.out kernel boot images, the following header must appear
-   somewhere in the first 8192 bytes of the kernel image file.  */
-struct multiboot_header
-{
-	/* Must be MULTIBOOT_MAGIC */
-	unsigned		magic;
-
-	/* Feature flags - see below.  */
-	unsigned		flags;
-
-	/*
-	 * Checksum
-	 *
-	 * The above fields plus this one must equal 0 mod 2^32.
-	 */
-	unsigned		checksum;
-
-	/* These are only valid if MULTIBOOT_AOUT_KLUDGE is set.  */
-	vm_offset_t		header_addr;
-	vm_offset_t		load_addr;
-	vm_offset_t		load_end_addr;
-	vm_offset_t		bss_end_addr;
-	vm_offset_t		entry;
-};
-
 /* The entire multiboot_header must be contained
    within the first MULTIBOOT_SEARCH bytes of the kernel image.  */
 #define MULTIBOOT_SEARCH	8192
@@ -65,8 +38,11 @@ struct multiboot_header
 /* Align all boot modules on page (4KB) boundaries.  */
 #define MULTIBOOT_PAGE_ALIGN	0x00000001
 
-/* Must be provided memory information in multiboot_info structure */
+/* Must be provided memory information in multiboot_raw_info structure */
 #define MULTIBOOT_MEMORY_INFO	0x00000002
+
+/* Must pass video information in multiboot_raw_info structure */
+#define MULTIBOOT_VIDEO_MODE	0x00000004
 
 /* Use the load address fields above instead of the ones in the a.out header
    to figure out what to load where, and what to do afterwards.
@@ -78,61 +54,7 @@ struct multiboot_header
    that the multiboot method is being used */
 #define MULTIBOOT_VALID         0x2badb002
 
-/* The boot loader passes this data structure to the kernel in
-   register EBX on entry.  */
-struct multiboot_info
-{
-	/* These flags indicate which parts of the multiboot_info are valid;
-	   see below for the actual flag bit definitions.  */
-	unsigned		flags;
 
-	/* Lower/Upper memory installed in the machine.
-	   Valid only if MULTIBOOT_MEMORY is set in flags word above.  */
-	vm_size_t		mem_lower;
-	vm_size_t		mem_upper;
-
-	/* BIOS disk device the kernel was loaded from.
-	   Valid only if MULTIBOOT_BOOT_DEVICE is set in flags word above.  */
-	unsigned char		boot_device[4];
-
-	/* Command-line for the OS kernel: a null-terminated ASCII string.
-	   Valid only if MULTIBOOT_CMDLINE is set in flags word above.  */
-	vm_offset_t		cmdline;
-
-	/* List of boot modules loaded with the kernel.
-	   Valid only if MULTIBOOT_MODS is set in flags word above.  */
-	unsigned		mods_count;
-	vm_offset_t		mods_addr;
-
-	/* Symbol information for a.out or ELF executables. */
-	union
-	{
-	  struct
-	  {
-	    /* a.out symbol information valid only if MULTIBOOT_AOUT_SYMS
-	       is set in flags word above.  */
-	    vm_size_t		tabsize;
-	    vm_size_t		strsize;
-	    vm_offset_t		addr;
-	    unsigned		reserved;
-	  } a;
-
-	  struct
-	  {
-	    /* ELF section header information valid only if
-	       MULTIBOOT_ELF_SHDR is set in flags word above.  */
-	    unsigned		num;
-	    vm_size_t		size;
-	    vm_offset_t		addr;
-	    unsigned		shndx;
-	  } e;
-	} syms;
-
-	/* Memory map buffer.
-	   Valid only if MULTIBOOT_MEM_MAP is set in flags word above.  */
-	vm_size_t		mmap_count;
-	vm_offset_t		mmap_addr;
-};
 
 #define MULTIBOOT_MEMORY	0x00000001
 #define MULTIBOOT_BOOT_DEVICE	0x00000002
@@ -141,7 +63,18 @@ struct multiboot_info
 #define MULTIBOOT_AOUT_SYMS	0x00000010
 #define MULTIBOOT_ELF_SHDR	0x00000020
 #define MULTIBOOT_MEM_MAP	0x00000040
+/* skip some fields from spec */
+#define MULTIBOOT_FRAMEBUFFER	0x00001000
 
+
+#define MULTIBOOT_VIDEO_MODE_TYPE_LINEARFB	0
+#define MULTIBOOT_VIDEO_MODE_TYPE_EGA_TEXT	1
+
+#define MULTIBOOT_VIDEO_PARAM_NO_PREFERENCE	0
+
+#ifndef __ASSEMBLER__
+
+#include <mach/machine/vm_types.h>
 
 /* The mods_addr field above contains the physical address of the first
    of 'mods_count' multiboot_module structures.  */
@@ -174,33 +107,6 @@ struct multiboot32_module
 	unsigned		reserved;
 };
 #endif
-
-
-/* The mmap_addr field above contains the physical address of the first
-   of the AddrRangeDesc structure.  "size" represents the size of the
-   rest of the structure and optional padding.  The offset to the beginning
-   of the next structure is therefore "size + 4".  */
-struct AddrRangeDesc
-{
-  unsigned long size;
-  unsigned long BaseAddrLow;
-  unsigned long BaseAddrHigh;
-  unsigned long LengthLow;
-  unsigned long LengthHigh;
-  unsigned long Type;
-
-  /* unspecified optional padding... */
-};
-
-struct multiboot_mmap
-{
-  unsigned long size;
-  unsigned long long BaseAddr;
-  unsigned long long Length;
-  unsigned long Type;
-
-  /* unspecified optional padding... */
-};
 
 /* usable memory "Type", all others are reserved.  */
 #define MB_ARD_MEMORY       1
@@ -254,6 +160,38 @@ struct multiboot_mmap
 #define MULTIBOOT_LOADER_SHDR       0x20
 #define MULTIBOOT_LOADER_MMAP       0x40
 
+struct multiboot_header
+{
+    /* Must be MULTIBOOT_MAGIC - see above. */
+    uint32_t magic;
+
+    /* Feature flags. */
+    uint32_t flags;
+
+    /* The above fields plus this one must equal 0 mod 2^32. */
+    uint32_t checksum;
+
+    /* These are only valid if MULTIBOOT_AOUT_KLUDGE is set. */
+    uint32_t header_addr;
+    uint32_t load_addr;
+    uint32_t load_end_addr;
+    uint32_t bss_end_addr;
+    uint32_t entry_addr;
+
+    /* These are only valid if MULTIBOOT_VIDEO_MODE is set. */
+    uint32_t mode_type;
+    uint32_t width;
+    uint32_t height;
+    uint32_t depth;
+} __packed;
+
+struct multiboot_color
+{
+    uint8_t red;
+    uint8_t green;
+    uint8_t blue;
+} __packed;
+
 /*
  * A multiboot module.
  */
@@ -274,6 +212,35 @@ struct multiboot_raw_mmap_entry {
     uint32_t type;
 } __packed;
 
+struct multiboot_framebuffer_info {
+    uint64_t framebuffer_addr;
+    uint32_t framebuffer_pitch;
+    uint32_t framebuffer_width;
+    uint32_t framebuffer_height;
+    uint8_t framebuffer_bpp;
+#define MULTIBOOT_FRAMEBUFFER_TYPE_INDEXED	0
+#define MULTIBOOT_FRAMEBUFFER_TYPE_RGB		1
+#define MULTIBOOT_FRAMEBUFFER_TYPE_EGA_TEXT	2
+    uint8_t framebuffer_type;
+    union
+    {
+        struct
+        {
+            uint32_t framebuffer_palette_addr;
+            uint16_t framebuffer_palette_num_colors;
+        };
+        struct
+        {
+            uint8_t framebuffer_red_field_position;
+            uint8_t framebuffer_red_mask_size;
+            uint8_t framebuffer_green_field_position;
+            uint8_t framebuffer_green_mask_size;
+            uint8_t framebuffer_blue_field_position;
+            uint8_t framebuffer_blue_mask_size;
+        };
+    };
+} __packed;
+
 /*
  * Multiboot information structure as passed by the boot loader.
  */
@@ -292,6 +259,7 @@ struct multiboot_raw_info {
     uint32_t mmap_length;
     uint32_t mmap_addr;
     uint32_t unused1[9];
+    struct multiboot_framebuffer_info fb_info;
 } __packed;
 
 /*
@@ -310,5 +278,7 @@ struct multiboot_os_info {
     struct multiboot_module *mods_addr;
     uint32_t mods_count;
 };
+
+#endif /* __ASSEMBLER__ */
 
 #endif /* _MACH_I386_MULTIBOOT_H_ */

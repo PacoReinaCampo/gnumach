@@ -29,7 +29,11 @@
 #ifndef	_I386_LOCK_H_
 #define	_I386_LOCK_H_
 
+#define	SIMPLE_LOCK_INITIALIZER(l) \
+	{.lock_data = 0}
+
 #if NCPUS > 1
+#include <i386/smp.h>
 
 /*
  *	All of the locking routines are built from calls on
@@ -44,10 +48,10 @@
  */
 
 #define	_simple_lock_xchg_(lock, new_val) \
-    ({	int _old_val_; \
-	asm volatile("xchgl %0, %2" \
+({	natural_t _old_val_; \
+	asm volatile("xchg %0, %2" \
 		    : "=r" (_old_val_) \
-		    : "0" (new_val), "m" (*(lock)) : "memory" \
+		    : "0" ((natural_t)(new_val)), "m" (*(lock)) : "memory" \
 		    ); \
 	_old_val_; \
     })
@@ -55,18 +59,18 @@
 #define	simple_lock_init(l) \
 	((l)->lock_data = 0)
 
-#define	simple_lock(l) \
+#define	_simple_lock(l) \
     ({ \
 	while(_simple_lock_xchg_(l, 1)) \
-	    while (*(volatile int *)&(l)->lock_data) \
-		continue; \
+	    while (*(volatile natural_t *)&(l)->lock_data) \
+		cpu_pause(); \
 	0; \
     })
 
-#define	simple_unlock(l) \
+#define	_simple_unlock(l) \
 	(_simple_lock_xchg_(l, 0))
 
-#define	simple_lock_try(l) \
+#define	_simple_lock_try(l) \
 	(!_simple_lock_xchg_(l, 1))
 
 /*
@@ -81,7 +85,7 @@
 			btsl	%0, %1	\n\
 			jb	0b" \
 		    : \
-		    : "r" (bit), "m" (*(volatile int *)(l)) : "memory"); \
+		    : "r" ((int)(bit)), "m" (*(volatile int *)(l)) : "memory"); \
 	0; \
     })
 
@@ -90,7 +94,7 @@
 	asm volatile("	lock		\n\
 			btrl	%0, %1" \
 		    : \
-		    : "r" (bit), "m" (*(volatile int *)(l)) : "memory"); \
+		    : "r" ((int)(bit)), "m" (*(volatile int *)(l)) : "memory"); \
 	0; \
     })
 
@@ -104,7 +108,7 @@
 	asm volatile("	lock		\n\
 			btsl	%0, %1" \
 		    : \
-		    : "r" (bit), "m" (*(l)) ); \
+		    : "r" ((int)(bit)), "m" (*(l)) ); \
 	0; \
     })
 
@@ -113,7 +117,7 @@
 	asm volatile("	lock		\n\
 			btrl	%0, %1" \
 		    : \
-		    : "r" (bit), "m" (*(l)) ); \
+		    : "r" ((int)(bit)), "m" (*(l)) ); \
 	0; \
     })
 

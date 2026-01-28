@@ -107,7 +107,7 @@ typedef	struct mach_device *mach_device_t;
 /*
  * To find and remove device entries
  */
-mach_device_t	device_lookup(char *);	/* by name */
+mach_device_t	device_lookup(const char *);	/* by name */
 
 void		mach_device_reference(mach_device_t);
 void		mach_device_deallocate(mach_device_t);
@@ -119,10 +119,12 @@ device_t	dev_port_lookup(ipc_port_t);
 void		dev_port_enter(mach_device_t);
 void		dev_port_remove(mach_device_t);
 
+typedef boolean_t (*dev_map_fn)(mach_device_t, mach_port_t);
+
 /*
  * To call a routine on each device
  */
-boolean_t	dev_map(boolean_t (*)(), mach_port_t);
+boolean_t	dev_map(dev_map_fn, mach_port_t);
 
 /*
  * To lock and unlock state and open-count
@@ -134,7 +136,7 @@ boolean_t	dev_map(boolean_t (*)(), mach_port_t);
  * device name lookup
  */
 extern boolean_t dev_name_lookup(
-    char *      	name,
+    const char *      	name,
     dev_ops_t   	*ops,   /* out */
     int     		*unit);  /* out */
 

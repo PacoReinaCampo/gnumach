@@ -157,6 +157,10 @@ boolean_t pmap_is_modified(phys_addr_t pa);
 extern phys_addr_t	pmap_extract(pmap_t, vm_offset_t);
 /* Perform garbage collection, if any.  */
 extern void		pmap_collect(pmap_t);
+
+/* Lookup an address.  */
+int pmap_whatis(pmap_t, vm_offset_t);
+
 /* Specify pageability.  */
 extern void		pmap_change_wiring(pmap_t, vm_offset_t, boolean_t);
 
@@ -194,7 +198,6 @@ extern void pmap_pageable(
  *      Back-door routine for mapping kernel VM at initialization.
  *      Useful for mapping memory outside the range of direct mapped
  *      physical memory (i.e., devices).
- *      Otherwise like pmap_map.
  */
 extern vm_offset_t pmap_map_bd(
         vm_offset_t virt,
@@ -206,17 +209,19 @@ extern vm_offset_t pmap_map_bd(
  * Routines defined as macros.
  */
 #ifndef	PMAP_ACTIVATE_USER
-#define	PMAP_ACTIVATE_USER(pmap, thread, cpu) {		\
+#define	PMAP_ACTIVATE_USER(pmap, thread, cpu)		\
+MACRO_BEGIN						\
 	if ((pmap) != kernel_pmap)			\
 	    PMAP_ACTIVATE(pmap, thread, cpu);		\
-}
+MACRO_END
 #endif	/* PMAP_ACTIVATE_USER */
 
 #ifndef	PMAP_DEACTIVATE_USER
-#define	PMAP_DEACTIVATE_USER(pmap, thread, cpu) {	\
+#define	PMAP_DEACTIVATE_USER(pmap, thread, cpu)		\
+MACRO_BEGIN						\
 	if ((pmap) != kernel_pmap)			\
 	    PMAP_DEACTIVATE(pmap, thread, cpu);		\
-}
+MACRO_END
 #endif	/* PMAP_DEACTIVATE_USER */
 
 #ifndef	PMAP_ACTIVATE_KERNEL

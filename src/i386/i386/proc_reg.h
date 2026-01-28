@@ -68,6 +68,8 @@
 					 * and FXRSTOR instructions */
 #define	CR4_OSXMMEXCPT	0x0400		/* Operating System Support for Unmasked
 					 * SIMD Floating-Point Exceptions */
+#define	CR4_OSXSAVE	0x40000		/* Operating System Support for XSAVE
+					 * and XRSTOR instructions */
 
 #ifndef	__ASSEMBLER__
 #ifdef	__GNUC__
@@ -82,9 +84,9 @@ get_eflags(void)
 {
 	unsigned long eflags;
 #ifdef __x86_64__
-	asm("pushfq; pop %0" : "=r" (eflags));
+	asm("pushfq; popq %0" : "=r" (eflags));
 #else
-	asm("pushfd; pop %0" : "=r" (eflags));
+	asm("pushfl; popl %0" : "=r" (eflags));
 #endif
 	return eflags;
 }
@@ -93,9 +95,9 @@ static inline void
 set_eflags(unsigned long eflags)
 {
 #ifdef __x86_64__
-	asm volatile("push %0; popfq" : : "r" (eflags));
+	asm volatile("pushq %0; popfq" : : "r" (eflags));
 #else
-	asm volatile("push %0; popfd" : : "r" (eflags));
+	asm volatile("pushl %0; popfl" : : "r" (eflags));
 #endif
 }
 
@@ -109,14 +111,14 @@ set_eflags(unsigned long eflags)
 #define get_eflags() \
     ({ \
 	register unsigned long _temp__; \
-	asm("pushfq; pop %0" : "=r" (_temp__)); \
+	asm("pushfq; popq %0" : "=r" (_temp__)); \
 	_temp__; \
     })
 #else
 #define get_eflags() \
     ({ \
 	register unsigned long _temp__; \
-	asm("pushfd; pop %0" : "=r" (_temp__)); \
+	asm("pushfl; popl %0" : "=r" (_temp__)); \
 	_temp__; \
     })
 #endif
@@ -375,6 +377,28 @@ extern unsigned long cr3;
 	register unsigned long _temp__ = (value); \
 	asm volatile("mov %0,%%dr7" : : "r" (_temp__)); \
     })
+#endif
+
+/* Note: gcc might want to use bx or the stack for %1 addressing, so we can't
+ * use them :/ */
+#ifdef __x86_64__
+#define cpuid(eax, ebx, ecx, edx) \
+MACRO_BEGIN \
+	uint64_t sav_rbx; \
+	asm(	"mov %%rbx,%2\n\t" \
+		"cpuid\n\t" \
+		"xchg %2,%%rbx\n\t" \
+		"movl %k2,%1\n\t" \
+		: "+a" (eax), "=m" (ebx), "=&r" (sav_rbx), "+c" (ecx), "=&d" (edx)); \
+MACRO_END
+#else
+#define cpuid(eax, ebx, ecx, edx) \
+MACRO_BEGIN \
+	asm (	"mov %%ebx,%1\n\t" \
+		"cpuid\n\t" \
+		"xchg %%ebx,%1\n\t" \
+		: "+a" (eax), "=&SD" (ebx), "+c" (ecx), "=&d" (edx)); \
+MACRO_END
 #endif
 
 #endif	/* __GNUC__ */

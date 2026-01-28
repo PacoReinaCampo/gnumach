@@ -42,6 +42,7 @@
 #include <kern/sched_prim.h>
 #include <kern/ipc_sched.h>
 #include <kern/ipc_kobject.h>
+#include <ipc/copy_user.h>
 #include <ipc/ipc_mqueue.h>
 #include <ipc/ipc_thread.h>
 #include <ipc/ipc_kmsg.h>
@@ -259,7 +260,7 @@ ipc_mqueue_send(
 
 	 	ip_unlock(port);
 		counter(c_ipc_mqueue_send_block++);
-		thread_block((void (*)(void)) 0);
+		thread_block(thread_no_continuation);
 		ip_lock(port);
 
 		/* why did we wake up? */
@@ -399,7 +400,7 @@ ipc_mqueue_send(
 mach_msg_return_t
 ipc_mqueue_copyin(
 	ipc_space_t	space,
-	mach_port_t	name,
+	mach_port_name_t	name,
 	ipc_mqueue_t	*mqueuep,
 	ipc_object_t	*objectp)
 {
@@ -494,7 +495,8 @@ ipc_mqueue_copyin(
  *		If resume is true, then we are resuming a receive
  *		operation after a blocked receive discarded our stack.
  *	Conditions:
- *		The message queue is locked; it will be returned unlocked.
+ *		The message queue is locked (unless resume is true); it
+ *		will be returned unlocked.
  *
  *		Our caller must hold a reference for the port or port set
  *		to which this queue belongs, to keep the queue
@@ -520,7 +522,7 @@ ipc_mqueue_receive(
 	mach_msg_size_t		max_size,
 	mach_msg_timeout_t	time_out,
 	boolean_t		resume,
-	void			(*continuation)(void),
+	continuation_t		continuation,
 	ipc_kmsg_t		*kmsgp,
 	mach_port_seqno_t	*seqnop)
 {
@@ -540,7 +542,7 @@ ipc_mqueue_receive(
 		if (kmsg != IKM_NULL) {
 			/* check space requirements */
 
-			if (kmsg->ikm_header.msgh_size > max_size) {
+			if (msg_usize(&kmsg->ikm_header) > max_size) {
 				* (mach_msg_size_t *) kmsgp =
 					kmsg->ikm_header.msgh_size;
 				imq_unlock(mqueue);
@@ -649,7 +651,7 @@ ipc_mqueue_receive(
 	/* we have a kmsg; unlock the msg queue */
 
 	imq_unlock(mqueue);
-	assert(kmsg->ikm_header.msgh_size <= max_size);
+	assert(msg_usize(&kmsg->ikm_header) <= max_size);
     }
 
     {

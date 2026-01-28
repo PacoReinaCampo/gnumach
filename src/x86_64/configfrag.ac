@@ -27,6 +27,10 @@ dnl USE OF THIS SOFTWARE.
     # Determines the size of the CPU cache line.
     AC_DEFINE([CPU_L1_SHIFT], [6], [CPU_L1_SHIFT])
 
+    [if test x"$enable_user32" = xyes ; then
+      user32_cpu=i686
+    fi]
+
     [# Does the architecture provide machine-specific interfaces?
     mach_machine_routines=1
 
@@ -44,7 +48,8 @@ esac]
 
 [case $host_platform:$host_cpu in
   at:x86_64)]
-    ncom=4
+    # should be 4, but we do not support shared IRQ for these
+    ncom=2
     nlpr=1
     AC_DEFINE([ATX86_64], [1], [ATX86_64])[;;
   xen:x86_64)]

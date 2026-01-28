@@ -184,6 +184,7 @@ struct vm_map {
 	pmap_t			pmap;		/* Physical map */
 	vm_size_t		size;		/* virtual size */
 	vm_size_t		size_wired;	/* wired size */
+	vm_size_t		size_none;	/* none protection size */
 	int			ref_count;	/* Reference count */
 	decl_simple_lock_data(,	ref_lock)	/* Lock for ref_count field */
 	vm_map_entry_t		hint;		/* hint for quick lookups */
@@ -198,6 +199,10 @@ struct vm_map {
 	unsigned int		timestamp;	/* Version number */
 
 	const char		*name;		/* Associated name */
+
+	vm_size_t		size_cur_limit; /* current limit on virtual memory size */
+	vm_size_t		size_max_limit; /* maximum size an unprivileged user can
+	                                           change current limit to */
 };
 
 #define vm_map_to_entry(map)	((struct vm_map_entry *) &(map)->hdr.links)
@@ -255,6 +260,10 @@ typedef struct vm_map_version {
 
 #define VM_MAP_COPY_PAGE_LIST_MAX	64
 
+struct vm_map_copy;
+struct vm_map_copyin_args_data;
+typedef kern_return_t (*vm_map_copy_cont_fn)(struct vm_map_copyin_args_data*, struct vm_map_copy**);
+
 typedef struct vm_map_copy {
 	int			type;
 #define VM_MAP_COPY_ENTRY_LIST	1
@@ -270,8 +279,8 @@ typedef struct vm_map_copy {
 	    struct {				/* PAGE_LIST */
 		vm_page_t		page_list[VM_MAP_COPY_PAGE_LIST_MAX];
 		int			npages;
-		kern_return_t		(*cont)();
-		char			*cont_args;
+		vm_map_copy_cont_fn cont;
+		struct vm_map_copyin_args_data* cont_args;
 	    } c_p;
 	} c_u;
 } *vm_map_copy_t;
@@ -307,14 +316,14 @@ MACRO_BEGIN								\
 	vm_map_copy_page_discard(old_copy);				\
 	*result = (*((old_copy)->cpy_cont))((old_copy)->cpy_cont_args,	\
 					    new_copy);			\
-	(old_copy)->cpy_cont = (kern_return_t (*)()) 0;			\
+	(old_copy)->cpy_cont = (vm_map_copy_cont_fn) 0;			\
 MACRO_END
 
 #define	vm_map_copy_invoke_extend_cont(old_copy, new_copy, result)	\
 MACRO_BEGIN								\
 	*result = (*((old_copy)->cpy_cont))((old_copy)->cpy_cont_args,	\
 					    new_copy);			\
-	(old_copy)->cpy_cont = (kern_return_t (*)()) 0;			\
+	(old_copy)->cpy_cont = (vm_map_copy_cont_fn) 0;			\
 MACRO_END
 
 #define vm_map_copy_abort_cont(old_copy)				\
@@ -322,25 +331,25 @@ MACRO_BEGIN								\
 	vm_map_copy_page_discard(old_copy);				\
 	(*((old_copy)->cpy_cont))((old_copy)->cpy_cont_args,		\
 				  (vm_map_copy_t *) 0);			\
-	(old_copy)->cpy_cont = (kern_return_t (*)()) 0;			\
-  	(old_copy)->cpy_cont_args = (char *) 0;				\
+	(old_copy)->cpy_cont = (vm_map_copy_cont_fn) 0;			\
+	(old_copy)->cpy_cont_args = VM_MAP_COPYIN_ARGS_NULL;		\
 MACRO_END
 
 #define vm_map_copy_has_cont(copy)					\
-    (((copy)->cpy_cont) != (kern_return_t (*)()) 0)
+    (((copy)->cpy_cont) != (vm_map_copy_cont_fn) 0)
 
 /*
  *	Continuation structures for vm_map_copyin_page_list.
  */
 
-typedef	struct {
+typedef	struct vm_map_copyin_args_data {
 	vm_map_t	map;
 	vm_offset_t	src_addr;
 	vm_size_t	src_len;
 	vm_offset_t	destroy_addr;
 	vm_size_t	destroy_len;
 	boolean_t	steal_pages;
-}  vm_map_copyin_args_data_t, *vm_map_copyin_args_t;
+} vm_map_copyin_args_data_t, *vm_map_copyin_args_t;
 
 #define	VM_MAP_COPYIN_ARGS_NULL	((vm_map_copyin_args_t) 0)
 
@@ -397,7 +406,7 @@ extern kern_return_t	vm_map_enter(vm_map_t, vm_offset_t *, vm_size_t,
 /* Enter a mapping primitive */
 extern kern_return_t	vm_map_find_entry(vm_map_t, vm_offset_t *, vm_size_t,
 					  vm_offset_t, vm_object_t,
-					  vm_map_entry_t *);
+					  vm_map_entry_t *, vm_prot_t, vm_prot_t);
 /* Deallocate a region */
 extern kern_return_t	vm_map_remove(vm_map_t, vm_offset_t, vm_offset_t);
 /* Change protection */
@@ -408,7 +417,7 @@ extern kern_return_t	vm_map_inherit(vm_map_t, vm_offset_t, vm_offset_t,
 				       vm_inherit_t);
 
 /* Look up an address */
-extern kern_return_t	vm_map_lookup(vm_map_t *, vm_offset_t, vm_prot_t,
+extern kern_return_t	vm_map_lookup(vm_map_t *, vm_offset_t, vm_prot_t, boolean_t,
 				      vm_map_version_t *, vm_object_t *,
 				      vm_offset_t *, vm_prot_t *, boolean_t *);
 /* Find a map entry */
@@ -437,6 +446,8 @@ extern vm_map_copy_t	vm_map_copy_copy(vm_map_copy_t);
 /* Page list continuation version of previous */
 extern kern_return_t	vm_map_copy_discard_cont(vm_map_copyin_args_t,
 						 vm_map_copy_t *);
+
+extern boolean_t	vm_map_coalesce_entry(vm_map_t, vm_map_entry_t);
 
 /* Add or remove machine- dependent attributes from map regions */
 extern kern_return_t	vm_map_machine_attribute(vm_map_t, vm_offset_t,
@@ -560,7 +571,8 @@ extern kern_return_t vm_map_submap(
 extern void _vm_map_clip_start(
         struct vm_map_header *map_header,
         vm_map_entry_t entry,
-        vm_offset_t start);
+        vm_offset_t	start,
+        boolean_t	link_gap);
 
 /*
  *      vm_map_clip_end:        [ internal use only ]
@@ -572,6 +584,15 @@ extern void _vm_map_clip_start(
 void _vm_map_clip_end(
 	struct vm_map_header 	*map_header,
 	vm_map_entry_t		entry,
-	vm_offset_t		end);
+	vm_offset_t		end,
+	boolean_t		link_gap);
+
+/*
+ *      This function is called to inherit the virtual memory limits
+ *      from one vm_map_t to another.
+ */
+void vm_map_copy_limits(
+	vm_map_t dst,
+	vm_map_t src);
 
 #endif	/* _VM_VM_MAP_H_ */

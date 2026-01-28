@@ -18,4 +18,17 @@
    along with this program; if not, write to the Free Software
    Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111, USA. */
 
+#ifndef _SMP_H_
+#define _SMP_H_
+
+#include <mach/machine/vm_types.h>
+
 int smp_init(void);
+void smp_remote_ast(unsigned logical_id);
+void smp_pmap_update(unsigned logical_id);
+int smp_startup_cpus(unsigned bsp_apic_id, phys_addr_t start_eip);
+
+#define cpu_pause() asm volatile ("pause" : : : "memory")
+#define STARTUP_VECTOR_SHIFT	(20 - 8)
+
+#endif

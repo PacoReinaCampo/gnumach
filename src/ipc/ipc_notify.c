@@ -58,7 +58,7 @@ mach_dead_name_notification_t		ipc_notify_dead_name_template;
  *		Initialize a template for port-deleted notifications.
  */
 
-void
+static void
 ipc_notify_init_port_deleted(mach_port_deleted_notification_t *n)
 {
 	mach_msg_header_t *m = &n->not_header;
@@ -72,7 +72,7 @@ ipc_notify_init_port_deleted(mach_port_deleted_notification_t *n)
 	m->msgh_id = MACH_NOTIFY_PORT_DELETED;
 
 	t->msgt_name = MACH_MSG_TYPE_PORT_NAME;
-	t->msgt_size = PORT_T_SIZE_IN_BITS;
+	t->msgt_size = PORT_NAME_T_SIZE_IN_BITS;
 	t->msgt_number = 1;
 	t->msgt_inline = TRUE;
 	t->msgt_longform = FALSE;
@@ -88,7 +88,7 @@ ipc_notify_init_port_deleted(mach_port_deleted_notification_t *n)
  *		Initialize a template for msg-accepted notifications.
  */
 
-void
+static void
 ipc_notify_init_msg_accepted(mach_msg_accepted_notification_t *n)
 {
 	mach_msg_header_t *m = &n->not_header;
@@ -102,7 +102,7 @@ ipc_notify_init_msg_accepted(mach_msg_accepted_notification_t *n)
 	m->msgh_id = MACH_NOTIFY_MSG_ACCEPTED;
 
 	t->msgt_name = MACH_MSG_TYPE_PORT_NAME;
-	t->msgt_size = PORT_T_SIZE_IN_BITS;
+	t->msgt_size = PORT_NAME_T_SIZE_IN_BITS;
 	t->msgt_number = 1;
 	t->msgt_inline = TRUE;
 	t->msgt_longform = FALSE;
@@ -118,7 +118,7 @@ ipc_notify_init_msg_accepted(mach_msg_accepted_notification_t *n)
  *		Initialize a template for port-destroyed notifications.
  */
 
-void
+static void
 ipc_notify_init_port_destroyed(mach_port_destroyed_notification_t *n)
 {
 	mach_msg_header_t *m = &n->not_header;
@@ -149,7 +149,7 @@ ipc_notify_init_port_destroyed(mach_port_destroyed_notification_t *n)
  *		Initialize a template for no-senders notifications.
  */
 
-void
+static void
 ipc_notify_init_no_senders(
 	mach_no_senders_notification_t	*n)
 {
@@ -164,7 +164,7 @@ ipc_notify_init_no_senders(
 	m->msgh_id = MACH_NOTIFY_NO_SENDERS;
 
 	t->msgt_name = MACH_MSG_TYPE_INTEGER_32;
-	t->msgt_size = PORT_T_SIZE_IN_BITS;
+	t->msgt_size = 32;
 	t->msgt_number = 1;
 	t->msgt_inline = TRUE;
 	t->msgt_longform = FALSE;
@@ -180,7 +180,7 @@ ipc_notify_init_no_senders(
  *		Initialize a template for send-once notifications.
  */
 
-void
+static void
 ipc_notify_init_send_once(
 	mach_send_once_notification_t	*n)
 {
@@ -200,7 +200,7 @@ ipc_notify_init_send_once(
  *		Initialize a template for dead-name notifications.
  */
 
-void
+static void
 ipc_notify_init_dead_name(
 	mach_dead_name_notification_t	*n)
 {
@@ -215,7 +215,7 @@ ipc_notify_init_dead_name(
 	m->msgh_id = MACH_NOTIFY_DEAD_NAME;
 
 	t->msgt_name = MACH_MSG_TYPE_PORT_NAME;
-	t->msgt_size = PORT_T_SIZE_IN_BITS;
+	t->msgt_size = PORT_NAME_T_SIZE_IN_BITS;
 	t->msgt_number = 1;
 	t->msgt_inline = TRUE;
 	t->msgt_longform = FALSE;
@@ -253,15 +253,15 @@ ipc_notify_init(void)
 
 void
 ipc_notify_port_deleted(
-	ipc_port_t 	port,
-	mach_port_t 	name)
+	ipc_port_t 		port,
+	mach_port_name_t 	name)
 {
 	ipc_kmsg_t kmsg;
 	mach_port_deleted_notification_t *n;
 
 	kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped port-deleted (0x%p, 0x%lx)\n", port, name);
+		printf("dropped port-deleted (0x%p, 0x%x)\n", port, name);
 		ipc_port_release_sonce(port);
 		return;
 	}
@@ -287,15 +287,15 @@ ipc_notify_port_deleted(
 
 void
 ipc_notify_msg_accepted(
-	ipc_port_t 	port,
-	mach_port_t 	name)
+	ipc_port_t 		port,
+	mach_port_name_t 	name)
 {
 	ipc_kmsg_t kmsg;
 	mach_msg_accepted_notification_t *n;
 
 	kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped msg-accepted (0x%p, 0x%lx)\n", port, name);
+		printf("dropped msg-accepted (0x%p, 0x%x)\n", port, name);
 		ipc_port_release_sonce(port);
 		return;
 	}
@@ -425,15 +425,15 @@ ipc_notify_send_once(ipc_port_t port)
 
 void
 ipc_notify_dead_name(
-	ipc_port_t 	port,
-	mach_port_t 	name)
+	ipc_port_t 		port,
+	mach_port_name_t 	name)
 {
 	ipc_kmsg_t kmsg;
 	mach_dead_name_notification_t *n;
 
 	kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped dead-name (0x%p, 0x%lx)\n", port, name);
+		printf("dropped dead-name (0x%p, 0x%x)\n", port, name);
 		ipc_port_release_sonce(port);
 		return;
 	}

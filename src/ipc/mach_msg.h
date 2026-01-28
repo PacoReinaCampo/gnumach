@@ -40,13 +40,13 @@
 #include <mach/message.h>
 
 extern mach_msg_return_t
-mach_msg_send(mach_msg_header_t *, mach_msg_option_t,
-	      mach_msg_size_t, mach_msg_timeout_t, mach_port_t);
+mach_msg_send(mach_msg_user_header_t *, mach_msg_option_t,
+	      mach_msg_size_t, mach_msg_timeout_t, mach_port_name_t);
 
 extern mach_msg_return_t
-mach_msg_receive(mach_msg_header_t *, mach_msg_option_t,
-		 mach_msg_size_t, mach_port_t,
-		 mach_msg_timeout_t, mach_port_t);
+mach_msg_receive(mach_msg_user_header_t *, mach_msg_option_t,
+		 mach_msg_size_t, mach_port_name_t,
+		 mach_msg_timeout_t, mach_port_name_t);
 
 extern void
 mach_msg_receive_continue(void);

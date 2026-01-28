@@ -38,10 +38,19 @@ compiler to 32-bit mode when using a 64-bit x86 (x86_64) ELF toolchain:
 
     $ [...]/configure --host=i686-gnu CC='gcc -m32' LD='ld -melf_i386'
 
+or point to a 32-bit ELF toolchain:
+
+    $ [...]/configure --host=i686-gnu CC=i686-linux-gnu-gcc LD=i686-linux-gnu-ld
+
+Also, GNU MIG needs to be a 32bit version to properly compile the interfaces,
+you can specify for instance
+
+    $ [...]/configure --host=i686-gnu CC=i686-linux-gnu-gcc LD=i686-linux-gnu-ld MIG=i686-linux-gnu-mig
+
 
 Please read the FAQ at <http://www.gnu.org/software/hurd/faq.html>.
 Bug reports should be sent to <bug-hurd@gnu.org> or filed on
 <http://savannah.gnu.org/bugs/?group=hurd>.  Requests for assistance
 should be sent to <help-hurd@gnu.org> or filed on
 <http://savannah.gnu.org/support/?group=hurd>.  You can also find us on
-the Freenode IRC network in the #hurd channel.
+the libera.chat IRC network in the #hurd channel.

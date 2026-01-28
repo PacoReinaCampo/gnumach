@@ -39,6 +39,9 @@
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/queue.h>
+#include <kern/sched.h>
+#include <kern/processor.h>
+#include <kern/smp.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
 
@@ -127,10 +130,10 @@ db_show_regs(
 #define db_thread_fp_used(thread)	FALSE
 #endif
 
-char *
-db_thread_stat(thread, status)
-	const thread_t 	thread;
-	char	 	*status;
+static char *
+db_thread_stat(
+	const thread_t 	thread,
+	char	 	status[9])
 {
 	char *p = status;
 
@@ -141,6 +144,8 @@ db_thread_stat(thread, status)
 	*p++ = (thread->state & TH_UNINT) ? 'N' : '.';
 	/* show if the FPU has been used */
 	*p++ = db_thread_fp_used(thread) ? 'F' : '.';
+	/* show if thread is VM-privileged */
+	*p++ = thread->vm_privilege ? 'P' : '.';
 	*p++ = 0;
 	return(status);
 }
@@ -151,8 +156,9 @@ db_print_thread(
 	int	 thread_id,
 	int	 flag)
 {
+	char status[9];
+
 	if (flag & OPTION_USER) {
-	    char status[8];
 	    char *indent = "";
 	    if (flag & OPTION_INDENT)
 	      indent = "    ";
@@ -182,14 +188,14 @@ db_print_thread(
 	    } else if (flag & OPTION_SCHED) {
 		if (flag & OPTION_THREAD_TITLE) {
 		    db_printf("%s     "
-			      "STAT    PRIORITY            POLICY   USAGE                 LAST\n",
+			      "STAT     PRIORITY            POLICY   USAGE                    LAST\n",
 			      indent);
 		    db_printf("%s ID: "
-			      "RWSONF  SET  MAX COMP DEPR  P DATA   CPU        SCHED      UPDATED\n",
+			      "RWSONFP  SET  MAX COMP DEPR  P DATA   CPU      SCHED      LAST UPDATED\n",
 			      indent);
 		    db_printf(" \n");
 		}
-		db_printf("%s%3d%c %s %4d %4d %4d %4d  %c %4d  %10d %10d %10d\n",
+		db_printf("%s%3d%c %s %4d %4d %4d %4d  %c %4d %10d %10d %2d %10d\n",
 			  indent, thread_id,
 			  (thread == current_thread())? '#': ':',
 			  db_thread_stat(thread, status),
@@ -205,6 +211,11 @@ db_print_thread(
 #endif	/* MACH_FIXPRI */
 			  thread->cpu_usage,
 			  thread->sched_usage,
+#if	NCPUS > 1
+			  thread->last_processor ? thread->last_processor->slot_num : -1,
+#else
+			  0,
+#endif
 			  thread->sched_stamp);
 	    } else {
 		if (thread_id % 3 == 0) {
@@ -219,11 +230,11 @@ db_print_thread(
 	    }
 	} else {
 	    if (flag & OPTION_INDENT)
-		db_printf("            %3d (%0*X) ", thread_id,
-			  2*sizeof(vm_offset_t), thread);
-	    else
-		db_printf("(%0*X) ", 2*sizeof(vm_offset_t), thread);
-	    char status[8];
+		db_printf("            %3d ", thread_id);
+	    if (thread->name[0] &&
+		strncmp (thread->name, thread->task->name, THREAD_NAME_SIZE))
+		db_printf("%s ", thread->name);
+	    db_printf("(%0*X) ", 2*sizeof(vm_offset_t), thread);
 	    db_printf("%s", db_thread_stat(thread, status));
 	    if (thread->state & TH_SWAPPED) {
 		if (thread->swap_func) {
@@ -244,7 +255,7 @@ db_print_thread(
 	}
 }
 
-void
+static void
 db_print_task(
 	task_t	task,
 	int	task_id,
@@ -329,13 +340,41 @@ db_show_all_tasks(db_expr_t addr,
 	    }
 }
 
+static void showrq(run_queue_t rq)
+{
+	db_printf("count(%d) low(%d)\n", rq->count, rq->low);
+}
+
 /*ARGSUSED*/
 void
-db_show_all_threads(addr, have_addr, count, modif)
-	db_expr_t	addr;
-	boolean_t	have_addr;
-	db_expr_t	count;
-	const char *	modif;
+db_show_all_runqs(
+	db_expr_t	addr,
+	boolean_t	have_addr,
+	db_expr_t	count,
+	const char *	modif)
+{
+	int i = 0;
+	processor_set_t pset;
+
+	queue_iterate(&all_psets, pset, processor_set_t, all_psets) {
+		db_printf("Processor set #%d runq:\t", i);
+		showrq(&pset->runq);
+		i++;
+	}
+	for (i = 0; i < smp_get_numcpus(); i++) {
+	    db_printf("Processor #%d runq:\t", i);
+	    showrq(&cpu_to_processor(i)->runq);
+	}
+	db_printf("Stuck threads:\t%d", stuck_count);
+}
+
+/*ARGSUSED*/
+void
+db_show_all_threads(
+	db_expr_t	addr,
+	boolean_t	have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	task_t task;
 	int task_id;
@@ -384,11 +423,11 @@ db_task_from_space(
 
 /*ARGSUSED*/
 void
-db_show_one_thread(addr, have_addr, count, modif)
-	db_expr_t	addr;
-	boolean_t	have_addr;
-	db_expr_t	count;
-	const char *	modif;
+db_show_one_thread(
+	db_expr_t	addr,
+	boolean_t	have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	int		flag;
 	int		thread_id;
@@ -432,11 +471,11 @@ db_show_one_thread(addr, have_addr, count, modif)
 
 /*ARGSUSED*/
 void
-db_show_one_task(addr, have_addr, count, modif)
-	db_expr_t	addr;
-	boolean_t	have_addr;
-	db_expr_t	count;
-	const char *	modif;
+db_show_one_task(
+	db_expr_t	addr,
+	boolean_t	have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	int		flag;
 	int		task_id;
@@ -466,10 +505,8 @@ db_show_one_task(addr, have_addr, count, modif)
 	db_print_task(task, task_id, flag);
 }
 
-int
-db_port_iterate(thread, func)
-	const thread_t thread;
-	void (*func)();
+static int
+db_port_iterate(const thread_t thread, void (*func)(int, const ipc_port_t, unsigned, int))
 {
 	ipc_entry_t entry;
 	int n = 0;
@@ -482,29 +519,8 @@ db_port_iterate(thread, func)
 	return(n);
 }
 
-ipc_port_t
-db_lookup_port(
-	thread_t 	thread,
-	int 		id)
-{
-	ipc_entry_t entry;
-
-	if (thread == THREAD_NULL)
-	    return(0);
-	if (id < 0)
-	    return(0);
-	entry = ipc_entry_lookup(thread->task->itk_space, (mach_port_t) id);
-	if (entry && entry->ie_bits & MACH_PORT_TYPE_PORT_RIGHTS)
-	    return((ipc_port_t)entry->ie_object);
-	return(0);
-}
-
 static void
-db_print_port_id(id, port, bits, n)
-	int id;
-	const ipc_port_t port;
-	unsigned bits;
-	int n;
+db_print_port_id(int id, const ipc_port_t port, unsigned bits, int n)
 {
 	if (n != 0 && n % 3 == 0)
 	    db_printf("\n");
@@ -530,11 +546,11 @@ db_print_port_id_long(
 
 /* ARGSUSED */
 void
-db_show_port_id(addr, have_addr, count, modif)
-	db_expr_t	addr;
-	boolean_t	have_addr;
-	db_expr_t	count;
-	const char *	modif;
+db_show_port_id(
+	db_expr_t	addr,
+	boolean_t	have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	thread_t thread;
 

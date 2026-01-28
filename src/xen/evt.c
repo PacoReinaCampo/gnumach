@@ -28,9 +28,10 @@
 #define NEVNT (sizeof(unsigned long) * sizeof(unsigned long) * 8)
 int	int_mask[NSPL];
 
-spl_t curr_ipl;
+spl_t curr_ipl[NCPUS];
+int spl_init = 0;
 
-void (*ivect[NEVNT])();
+interrupt_handler_fn ivect[NEVNT];
 int intpri[NEVNT];
 int iunit[NEVNT];
 
@@ -63,7 +64,7 @@ void hyp_c_callback(void *ret_addr, void *regs)
 					if (ivect[n]) {
 						spl_t spl = splx(intpri[n]);
 						asm ("lock; and %1,%0":"=m"(hyp_shared_info.evtchn_pending[i]):"r"(~(1UL<<j)));
-						ivect[n](iunit[n], spl, ret_addr, regs);
+						((void(*)(int, int, const char*, struct i386_interrupt_state*))(ivect[n]))(iunit[n], spl, ret_addr, regs);
 						splx_cli(spl);
 					} else {
 						printf("warning: lost unbound event %d\n", n);
@@ -91,9 +92,12 @@ void form_int_mask(void)
 extern void hyp_callback(void);
 extern void hyp_failsafe_callback(void);
 
-void hyp_intrinit() {
+void hyp_intrinit(void) {
+	int i;
+
 	form_int_mask();
-	curr_ipl = SPLHI;
+	for (i = 0; i < NCPUS; i++)
+		curr_ipl[i] = SPLHI;
 	hyp_shared_info.evtchn_mask[0] = int_mask[SPLHI];
 #ifdef __i386__
 	hyp_set_callbacks(KERNEL_CS, hyp_callback,
@@ -104,7 +108,7 @@ void hyp_intrinit() {
 #endif
 }
 
-void hyp_evt_handler(evtchn_port_t port, void (*handler)(), int unit, spl_t spl) {
+void hyp_evt_handler(evtchn_port_t port, interrupt_handler_fn handler, int unit, spl_t spl) {
 	if (port > NEVNT)
 		panic("event channel port %d > %d not supported\n", port, (int) NEVNT);
 	intpri[port] = spl;

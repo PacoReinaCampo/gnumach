@@ -47,7 +47,9 @@
 #include <kern/lock.h>
 #include <kern/rdxtree.h>
 #include <kern/slab.h>
+#include <kern/printf.h>
 #include <ipc/ipc_entry.h>
+#include <ipc/ipc_port.h>
 #include <ipc/ipc_types.h>
 
 /*
@@ -142,7 +144,7 @@ void		ipc_space_destroy(struct ipc_space *);
 static inline ipc_entry_t
 ipc_entry_lookup(
 	ipc_space_t space,
-	mach_port_t name)
+	mach_port_name_t name)
 {
 	ipc_entry_t entry;
 
@@ -154,6 +156,22 @@ ipc_entry_lookup(
 	assert((entry == IE_NULL) || IE_BITS_TYPE(entry->ie_bits));
 	return entry;
 }
+
+extern volatile boolean_t mach_port_deallocate_debug;
+
+#define ipc_entry_lookup_failed(msg, port_name)				\
+MACRO_BEGIN								\
+	if (MACH_PORT_NAME_VALID(port_name)) {				\
+		printf("task %.*s looked up a bogus port %lu for %d, "	\
+		       "most probably a bug.\n",			\
+			(int) sizeof current_task()->name, 		\
+		        current_task()->name,				\
+		        (unsigned long) (port_name),			\
+			(msg)->msgh_id);				\
+		if (mach_port_deallocate_debug)				\
+			SoftDebugger("ipc_entry_lookup");		\
+	}								\
+MACRO_END
 
 /*
  *	Routine:	ipc_entry_get
@@ -170,10 +188,10 @@ ipc_entry_lookup(
 static inline kern_return_t
 ipc_entry_get(
 	ipc_space_t space,
-	mach_port_t *namep,
+	mach_port_name_t *namep,
 	ipc_entry_t *entryp)
 {
-	mach_port_t new_name;
+	mach_port_name_t new_name;
 	ipc_entry_t free_entry;
 
 	assert(space->is_active);
@@ -208,7 +226,7 @@ ipc_entry_get(
 	 *	(See comment in ipc/ipc_table.h.)
 	 */
 
-	assert(MACH_PORT_VALID(new_name));
+	assert(MACH_PORT_NAME_VALID(new_name));
 	assert(free_entry->ie_object == IO_NULL);
 
 	space->is_size += 1;
@@ -229,7 +247,7 @@ ipc_entry_get(
 static inline void
 ipc_entry_dealloc(
 	ipc_space_t	space,
-	mach_port_t	name,
+	mach_port_name_t	name,
 	ipc_entry_t	entry)
 {
 	assert(space->is_active);

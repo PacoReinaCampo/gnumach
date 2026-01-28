@@ -57,16 +57,38 @@
 #define	i386_V86_ASSIST_STATE	4
 #define	i386_REGS_SEGS_STATE	5
 #define	i386_DEBUG_STATE	6
+#define	i386_FSGS_BASE_STATE	7
+#define	i386_XFLOAT_STATE	8
 
 /*
  * This structure is used for both
  * i386_THREAD_STATE and i386_REGS_SEGS_STATE.
  */
 struct i386_thread_state {
+#if defined(__x86_64__) && !defined(USER32)
+	uint64_t	r8;
+	uint64_t	r9;
+	uint64_t	r10;
+	uint64_t	r11;
+	uint64_t	r12;
+	uint64_t	r13;
+	uint64_t	r14;
+	uint64_t	r15;
+	uint64_t	rdi;
+	uint64_t	rsi;
+	uint64_t	rbp;
+	uint64_t	rsp;
+	uint64_t	rbx;
+	uint64_t	rdx;
+	uint64_t	rcx;
+	uint64_t	rax;
+	uint64_t	rip;
+#else
 	unsigned int	gs;
 	unsigned int	fs;
 	unsigned int	es;
 	unsigned int	ds;
+
 	unsigned int	edi;
 	unsigned int	esi;
 	unsigned int	ebp;
@@ -76,9 +98,17 @@ struct i386_thread_state {
 	unsigned int	ecx;
 	unsigned int	eax;
 	unsigned int	eip;
+#endif  /* __x86_64__ && !USER32 */
+
 	unsigned int	cs;
+#if defined(__x86_64__) && !defined(USER32)
+	uint64_t	rfl;
+	uint64_t	ursp;
+#else
 	unsigned int	efl;
 	unsigned int	uesp;
+#endif  /* __x86_64__ and !USER32 */
+
 	unsigned int	ss;
 };
 #define i386_THREAD_STATE_COUNT	(sizeof (struct i386_thread_state)/sizeof(unsigned int))
@@ -119,6 +149,17 @@ struct i386_float_state {
 };
 #define i386_FLOAT_STATE_COUNT (sizeof(struct i386_float_state)/sizeof(unsigned int))
 
+struct i386_xfloat_state {
+	int		fpkind;			/* FP_NO..FP_387X (readonly) */
+	int		initialized;
+	int		exc_status;		/* exception status (readonly) */
+	int		fp_save_kind;		/* format of hardware state */
+	unsigned char	hw_state[];		/* actual "hardware" state */
+	/* don't add anything here, as hw_state is dynamically sized */
+};
+/* NOTE: i386_XFLOAT_STATE_COUNT is not defined as i386_xfloat_state is
+ * dynamically sized. Use i386_get_xstate_size(host) to get the current
+ * size. */
 
 #define PORT_MAP_BITS 0x400
 struct i386_isa_port_map_state {
@@ -150,5 +191,12 @@ struct i386_debug_state {
 };
 #define	i386_DEBUG_STATE_COUNT \
 	    (sizeof(struct i386_debug_state)/sizeof(unsigned int))
+
+struct i386_fsgs_base_state {
+	unsigned long fs_base;
+	unsigned long gs_base;
+};
+#define i386_FSGS_BASE_STATE_COUNT \
+	    (sizeof(struct i386_fsgs_base_state)/sizeof(unsigned int))
 
 #endif	/* _MACH_I386_THREAD_STATUS_H_ */

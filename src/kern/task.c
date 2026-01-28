@@ -44,7 +44,10 @@
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/slab.h>
+#include <kern/gnumach.server.h>
 #include <kern/kalloc.h>
+#include <kern/mach.server.h>
+#include <kern/mach_host.server.h>
 #include <kern/processor.h>
 #include <kern/printf.h>
 #include <kern/sched_prim.h>	/* for thread_wakeup */
@@ -52,7 +55,7 @@
 #include <kern/syscall_emulation.h>
 #include <kern/task_notify.user.h>
 #include <vm/vm_kern.h>		/* for kernel_map, ipc_kernel_map */
-#include <machine/machspl.h>	/* for splsched */
+#include <machine/spl.h>	/* for splsched */
 
 task_t	kernel_task = TASK_NULL;
 struct kmem_cache task_cache;
@@ -119,10 +122,15 @@ task_create_kernel(
 			new_task->map = VM_MAP_NULL;
 		else {
 			new_task->map = vm_map_create(new_pmap,
-					round_page(VM_MIN_ADDRESS),
-					trunc_page(VM_MAX_ADDRESS));
+					round_page(VM_MIN_USER_ADDRESS),
+					trunc_page(VM_MAX_USER_ADDRESS));
 			if (new_task->map == VM_MAP_NULL)
 				pmap_destroy(new_pmap);
+			else if (parent_task != TASK_NULL) {
+				vm_map_lock_read(parent_task->map);
+				vm_map_copy_limits(new_task->map, parent_task->map);
+				vm_map_unlock_read(parent_task->map);
+			}
 		}
 	}
 	if (new_task->map == VM_MAP_NULL) {
@@ -151,10 +159,8 @@ task_create_kernel(
 	ipc_task_init(new_task, parent_task);
 	machine_task_init (new_task);
 
-	new_task->total_user_time.seconds = 0;
-	new_task->total_user_time.microseconds = 0;
-	new_task->total_system_time.seconds = 0;
-	new_task->total_system_time.microseconds = 0;
+	time_value64_init(&new_task->total_user_time);
+	time_value64_init(&new_task->total_system_time);
 
 	record_time_stamp (&new_task->creation_time);
 
@@ -178,6 +184,7 @@ task_create_kernel(
 
 	new_task->may_assign = TRUE;
 	new_task->assign_active = FALSE;
+	new_task->essential = FALSE;
 
 #if	MACH_PCSAMPLE
 	new_task->pc_sample.buffer = 0;
@@ -785,35 +792,38 @@ kern_return_t task_info(
 	    {
 		task_basic_info_t	basic_info;
 
-		/* Allow *task_info_count to be two words smaller than
-		   the usual amount, because creation_time is a new member
-		   that some callers might not know about. */
+		/* Allow *task_info_count to be smaller than the provided amount
+		 * that does not contain the new time_value64_t fields as some
+		 * callers might not know about them yet. */
 
-		if (*task_info_count < TASK_BASIC_INFO_COUNT - 2) {
+		if (*task_info_count <
+				TASK_BASIC_INFO_COUNT - 3 * sizeof(time_value64_t)/sizeof(integer_t))
 		    return KERN_INVALID_ARGUMENT;
-		}
 
 		basic_info = (task_basic_info_t) task_info_out;
 
 		map = (task == kernel_task) ? kernel_map : task->map;
 
 		basic_info->virtual_size  = map->size;
-		basic_info->resident_size = pmap_resident_count(map->pmap)
+		basic_info->resident_size = ((rpc_vm_size_t) pmap_resident_count(map->pmap))
 						   * PAGE_SIZE;
 
 		task_lock(task);
 		basic_info->base_priority = task->priority;
 		basic_info->suspend_count = task->user_stop_count;
-		basic_info->user_time.seconds
-				= task->total_user_time.seconds;
-		basic_info->user_time.microseconds
-				= task->total_user_time.microseconds;
-		basic_info->system_time.seconds
-				= task->total_system_time.seconds;
-		basic_info->system_time.microseconds
-				= task->total_system_time.microseconds;
-		read_time_stamp(&task->creation_time,
-				&basic_info->creation_time);
+		TIME_VALUE64_TO_TIME_VALUE(&task->total_user_time,
+				&basic_info->user_time);
+		TIME_VALUE64_TO_TIME_VALUE(&task->total_system_time,
+				&basic_info->system_time);
+		time_value64_t creation_time64;
+		read_time_stamp(&task->creation_time, &creation_time64);
+		TIME_VALUE64_TO_TIME_VALUE(&creation_time64, &basic_info->creation_time);
+		if (*task_info_count == TASK_BASIC_INFO_COUNT) {
+		    /* Copy new time_value64_t fields */
+		    basic_info->user_time64 = task->total_user_time;
+		    basic_info->system_time64 = task->total_system_time;
+		    basic_info->creation_time64 = creation_time64;
+		}
 		task_unlock(task);
 
 		if (*task_info_count > TASK_BASIC_INFO_COUNT)
@@ -850,21 +860,22 @@ kern_return_t task_info(
 		task_thread_times_info_t times_info;
 		thread_t	thread;
 
-		if (*task_info_count < TASK_THREAD_TIMES_INFO_COUNT) {
+		/* Callers might not known about time_value64_t fields yet. */
+		if (*task_info_count < TASK_THREAD_TIMES_INFO_COUNT - (2 * sizeof(time_value64_t)) / sizeof(integer_t)) {
 		    return KERN_INVALID_ARGUMENT;
 		}
 
 		times_info = (task_thread_times_info_t) task_info_out;
-		times_info->user_time.seconds = 0;
-		times_info->user_time.microseconds = 0;
-		times_info->system_time.seconds = 0;
-		times_info->system_time.microseconds = 0;
+
+		time_value64_t acc_user_time, acc_system_time;
+		time_value64_init(&acc_user_time);
+		time_value64_init(&acc_system_time);
 
 		task_lock(task);
 		queue_iterate(&task->thread_list, thread,
 			      thread_t, thread_list)
 		{
-		    time_value_t user_time, system_time;
+		    time_value64_t user_time, system_time;
 		    spl_t		 s;
 
 		    s = splsched();
@@ -875,12 +886,20 @@ kern_return_t task_info(
 		    thread_unlock(thread);
 		    splx(s);
 
-		    time_value_add(&times_info->user_time, &user_time);
-		    time_value_add(&times_info->system_time, &system_time);
+		    time_value64_add(&acc_user_time, &user_time);
+		    time_value64_add(&acc_system_time, &system_time);
 		}
 		task_unlock(task);
+		TIME_VALUE64_TO_TIME_VALUE(&acc_user_time, &times_info->user_time);
+		TIME_VALUE64_TO_TIME_VALUE(&acc_system_time, &times_info->system_time);
+		if (*task_info_count >= TASK_THREAD_TIMES_INFO_COUNT) {
+		    /* Copy new time_value64_t fields */
+		    times_info->user_time64 = acc_user_time;
+		    times_info->system_time64 = acc_system_time;
+		}
 
-		*task_info_count = TASK_THREAD_TIMES_INFO_COUNT;
+		if (*task_info_count > TASK_THREAD_TIMES_INFO_COUNT)
+		  *task_info_count = TASK_THREAD_TIMES_INFO_COUNT;
 		break;
 	    }
 
@@ -1149,10 +1168,31 @@ task_priority(
 kern_return_t
 task_set_name(
 	task_t			task,
-	kernel_debug_name_t	name)
+	const_kernel_debug_name_t	name)
 {
+	if (task == TASK_NULL)
+		return KERN_INVALID_ARGUMENT;
+
 	strncpy(task->name, name, sizeof task->name - 1);
 	task->name[sizeof task->name - 1] = '\0';
+	return KERN_SUCCESS;
+}
+
+/*
+ *	task_set_essential
+ *
+ *	Set whether TASK is an essential task, i.e. the whole system will crash
+ *	if this task crashes.
+ */
+kern_return_t
+task_set_essential(
+	task_t			task,
+	boolean_t		essential)
+{
+	if (task == TASK_NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	task->essential = !!essential;
 	return KERN_SUCCESS;
 }
 
@@ -1162,7 +1202,7 @@ task_set_name(
  *	Attempt to free resources owned by tasks.
  */
 
-void task_collect_scan(void)
+static void task_collect_scan(void)
 {
 	task_t			task, prev_task;
 	processor_set_t		pset, prev_pset;

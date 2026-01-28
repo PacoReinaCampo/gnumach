@@ -70,7 +70,7 @@ typedef struct vm_fault_state {
 	vm_offset_t vmf_vaddr;
 	vm_prot_t vmf_fault_type;
 	boolean_t vmf_change_wiring;
-	void (*vmf_continuation)();
+	vm_fault_continuation_t vmf_continuation;
 	vm_map_version_t vmf_version;
 	boolean_t vmf_wired;
 	struct vm_object *vmf_object;
@@ -127,6 +127,8 @@ vm_fault_cleanup(
 	vm_object_t	object,
 	vm_page_t	top_page)
 {
+	assert(vm_object_lock_taken(object));
+
 	vm_object_paging_end(object);
 	vm_object_unlock(object);
 
@@ -218,7 +220,7 @@ vm_fault_return_t vm_fault_page(
 					 */
  /* More arguments: */
 	boolean_t	resume,		/* We are restarting. */
-	void		(*continuation)()) /* Continuation for blocking. */
+	continuation_t	continuation) 	/* Continuation for blocking. */
 {
 	vm_page_t	m;
 	vm_object_t	object;
@@ -347,7 +349,7 @@ vm_fault_return_t vm_fault_page(
 
 				PAGE_ASSERT_WAIT(m, interruptible);
 				vm_object_unlock(object);
-				if (continuation != (void (*)()) 0) {
+				if (continuation != thread_no_continuation) {
 					vm_fault_state_t *state =
 						(vm_fault_state_t *) current_thread()->ith_other;
 
@@ -423,7 +425,7 @@ vm_fault_return_t vm_fault_page(
 					 * need to allocate a real page.
 					 */
 
-					real_m = vm_page_grab();
+					real_m = vm_page_grab(VM_PAGE_HIGHMEM);
 					if (real_m == VM_PAGE_NULL) {
 						vm_fault_cleanup(object, first_m);
 						return(VM_FAULT_MEMORY_SHORTAGE);
@@ -652,7 +654,7 @@ vm_fault_return_t vm_fault_page(
 				m->offset + object->paging_offset,
 				PAGE_SIZE, access_required)) != KERN_SUCCESS) {
 				if (object->pager && rc != MACH_SEND_INTERRUPTED)
-					printf("%s(0x%p, 0x%p, 0x%lx, 0x%x, 0x%x) failed, %x\n",
+					printf("%s(0x%p, 0x%p, 0x%zx, 0x%x, 0x%x) failed, %x\n",
 						"memory_object_data_request",
 						object->pager,
 						object->pager_request,
@@ -810,7 +812,7 @@ vm_fault_return_t vm_fault_page(
 			/*
 			 *	Allocate a page for the copy
 			 */
-			copy_m = vm_page_grab();
+			copy_m = vm_page_grab(VM_PAGE_HIGHMEM);
 			if (copy_m == VM_PAGE_NULL) {
 				RELEASE_PAGE(m);
 				vm_fault_cleanup(object, first_m);
@@ -1082,7 +1084,7 @@ vm_fault_return_t vm_fault_page(
     block_and_backoff:
 	vm_fault_cleanup(object, first_m);
 
-	if (continuation != (void (*)()) 0) {
+	if (continuation != thread_no_continuation) {
 		vm_fault_state_t *state =
 			(vm_fault_state_t *) current_thread()->ith_other;
 
@@ -1129,7 +1131,7 @@ vm_fault_return_t vm_fault_page(
  *		and deallocated when leaving vm_fault.
  */
 
-void
+static void
 vm_fault_continue(void)
 {
 	vm_fault_state_t *state =
@@ -1149,7 +1151,7 @@ kern_return_t vm_fault(
 	vm_prot_t	fault_type,
 	boolean_t	change_wiring,
 	boolean_t	resume,
-	void		(*continuation)())
+	vm_fault_continuation_t	continuation)
 {
 	vm_map_version_t	version;	/* Map version for verificiation */
 	boolean_t		wired;		/* Should mapping be wired down? */
@@ -1187,7 +1189,7 @@ kern_return_t vm_fault(
 		goto after_vm_fault_page;
 	}
 
-	if (continuation != (void (*)()) 0) {
+	if (continuation != vm_fault_no_continuation) {
 		/*
 		 *	We will probably need to save state.
 		 */
@@ -1213,7 +1215,7 @@ kern_return_t vm_fault(
 	 *	it to begin the search.
 	 */
 
-	if ((kr = vm_map_lookup(&map, vaddr, fault_type, &version,
+	if ((kr = vm_map_lookup(&map, vaddr, fault_type, FALSE, &version,
 				&object, &offset,
 				&prot, &wired)) != KERN_SUCCESS) {
 		goto done;
@@ -1239,7 +1241,7 @@ kern_return_t vm_fault(
 	object->ref_count++;
 	vm_object_paging_begin(object);
 
-	if (continuation != (void (*)()) 0) {
+	if (continuation != vm_fault_no_continuation) {
 		vm_fault_state_t *state =
 			(vm_fault_state_t *) current_thread()->ith_other;
 
@@ -1293,7 +1295,7 @@ kern_return_t vm_fault(
 			kr = KERN_SUCCESS;
 			goto done;
 		case VM_FAULT_MEMORY_SHORTAGE:
-			if (continuation != (void (*)()) 0) {
+			if (continuation != vm_fault_no_continuation) {
 				vm_fault_state_t *state =
 					(vm_fault_state_t *) current_thread()->ith_other;
 
@@ -1375,7 +1377,7 @@ kern_return_t vm_fault(
 		 *	take another fault.
 		 */
 		kr = vm_map_lookup(&map, vaddr,
-				   fault_type & ~VM_PROT_WRITE, &version,
+				   fault_type & ~VM_PROT_WRITE, FALSE, &version,
 				   &retry_object, &retry_offset, &retry_prot,
 				   &wired);
 
@@ -1476,7 +1478,7 @@ kern_return_t vm_fault(
 #undef	RELEASE_PAGE
 
     done:
-	if (continuation != (void (*)()) 0) {
+	if (continuation != vm_fault_no_continuation) {
 		vm_fault_state_t *state =
 			(vm_fault_state_t *) current_thread()->ith_other;
 
@@ -1520,7 +1522,7 @@ void vm_fault_wire(
 	for (va = entry->vme_start; va < end_addr; va += PAGE_SIZE) {
 		if (vm_fault_wire_fast(map, va, entry) != KERN_SUCCESS)
 			(void) vm_fault(map, va, VM_PROT_NONE, TRUE,
-					FALSE, (void (*)()) 0);
+					FALSE, vm_fault_no_continuation);
 	}
 }
 
@@ -1554,7 +1556,7 @@ void vm_fault_unwire(
 		if (object == VM_OBJECT_NULL) {
 			vm_map_lock_set_recursive(map);
 			(void) vm_fault(map, va, VM_PROT_NONE, TRUE,
-					FALSE, (void (*)()) 0);
+					FALSE, vm_fault_no_continuation);
 			vm_map_lock_clear_recursive(map);
 		} else {
 		 	vm_prot_t	prot;
@@ -1635,33 +1637,37 @@ kern_return_t vm_fault_wire_fast(
  */
 
 #undef	RELEASE_PAGE
-#define RELEASE_PAGE(m)	{				\
+#define RELEASE_PAGE(m)					\
+MACRO_BEGIN						\
 	PAGE_WAKEUP_DONE(m);				\
 	vm_page_lock_queues();				\
 	vm_page_unwire(m);				\
 	vm_page_unlock_queues();			\
-}
+MACRO_END
 
 
 #undef	UNLOCK_THINGS
-#define UNLOCK_THINGS	{				\
+#define UNLOCK_THINGS					\
+MACRO_BEGIN						\
 	object->paging_in_progress--;			\
 	vm_object_unlock(object);			\
-}
+MACRO_END
 
 #undef	UNLOCK_AND_DEALLOCATE
-#define UNLOCK_AND_DEALLOCATE	{			\
+#define UNLOCK_AND_DEALLOCATE				\
+MACRO_BEGIN						\
 	UNLOCK_THINGS;					\
 	vm_object_deallocate(object);			\
-}
+MACRO_END
 /*
  *	Give up and have caller do things the hard way.
  */
 
-#define GIVE_UP {					\
+#define GIVE_UP						\
+MACRO_BEGIN						\
 	UNLOCK_AND_DEALLOCATE;				\
 	return(KERN_FAILURE);				\
-}
+MACRO_END
 
 
 	/*
@@ -1767,7 +1773,7 @@ kern_return_t vm_fault_wire_fast(
  *		Release a page used by vm_fault_copy.
  */
 
-void	vm_fault_copy_cleanup(
+static void vm_fault_copy_cleanup(
 	vm_page_t	page,
 	vm_page_t	top_page)
 {

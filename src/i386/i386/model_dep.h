@@ -29,6 +29,11 @@
 #include <mach/std_types.h>
 
 /*
+ * Address to hold AP boot code, held in ASM
+ */
+extern phys_addr_t apboot_addr;
+
+/*
  * Find devices.  The system is alive.
  */
 extern void machine_init (void);
@@ -54,5 +59,10 @@ extern void halt_all_cpus (boolean_t reboot) __attribute__ ((noreturn));
  * Make cpu pause a bit.
  */
 extern void machine_relax (void);
+
+/*
+ * C boot entrypoint - called by boot_entry in boothdr.S.
+ */
+extern void c_boot_entry(vm_offset_t bi);
 
 #endif /* _I386AT_MODEL_DEP_H_ */

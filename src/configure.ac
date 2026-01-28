@@ -21,6 +21,15 @@ AC_INIT([AC_PACKAGE_NAME], [AC_PACKAGE_VERSION], [AC_PACKAGE_BUGREPORT],
   [AC_PACKAGE_TARNAME])
 AC_CONFIG_SRCDIR([kern/ipc_kobject.c])
 
+if test -z "${CFLAGS+set}"; then
+  # Use these CFLAGS by default if nothing is set.
+  CFLAGS="-g -O2"
+fi
+saved_CFLAGS="$CFLAGS"
+# We don't need glibc to compile gnumach so ensure we don't try to use it
+# during configure.
+CFLAGS="$CFLAGS -ffreestanding -nostdlib"
+
 AC_CONFIG_AUX_DIR([build-aux])
 
 AM_INIT_AUTOMAKE(
@@ -56,10 +65,11 @@ case $host_platform:$host_cpu in
   default:i?86)
     host_platform=at;;
   default:x86_64)]
-    AC_MSG_WARN([Platform set to Xen by default, this can not boot on non-Xen systems, you currently need a 32bit build for that.])
-    [host_platform=xen;;
+    [host_platform=at;;
   at:i?86 | xen:i?86 | at:x86_64 | xen:x86_64)
     :;;
+  *:aarch64)
+    ;;
   *)]
     AC_MSG_ERROR([unsupported combination of cpu type `$host_cpu' and platform
       `$host_platform'.])[;;
@@ -80,7 +90,12 @@ AC_SUBST([systype])
 #
 
 AC_PROG_AWK
+# Temporarily force cross compiling mode to make sure the configure script
+# does not try to run compiled binaries.
+save_cross_compiling=$cross_compiling
+cross_compiling=yes
 AM_PROG_AS
+cross_compiling=$save_cross_compiling
 AC_PROG_CC
 AC_PROG_CPP
 AC_PROG_INSTALL
@@ -89,7 +104,14 @@ AC_CHECK_TOOL([AR], [ar])
 AC_CHECK_TOOL([LD], [ld])
 AC_CHECK_TOOL([NM], [nm])
 
-AC_CHECK_TOOL([MIG], [mig], [mig])
+AC_CHECK_TOOL([MIG], [mig], [no])
+AC_ARG_VAR([MIG], [Path to the mig tool])
+
+if test x$MIG = xno
+then
+    AC_MSG_WARN([mig was not found, we will not be able to build a kernel, only install headers. Install or build mig against them, and run configure again. If you already did so, perhaps you need to specify the path with MIG=])
+    MIG=mig
+fi
 
 dnl Needed for the Automake option `subdir-objects'.
 AM_PROG_CC_C_O
@@ -104,9 +126,6 @@ AC_CHECK_PROG([PATCH], [patch], [patch], [patch-not-found])
 #
 # configure fragments.
 #
-
-# The test suite.
-m4_include([tests/configfrag.ac])
 
 # Default set of device drivers.
 AC_ARG_ENABLE([device-drivers],
@@ -129,6 +148,16 @@ AC_ARG_ENABLE([device-drivers],
     [;;
 esac]
 
+AC_ARG_ENABLE([user32],
+AS_HELP_STRING([--enable-user32], [enable 32-bit user space on a 64-bit kernel]))
+[if [ x"$enable_user32" = xyes ]; then]
+  AC_DEFINE([USER32], [], [enable 32-bit user on 64-bit kernel])
+  AM_CONDITIONAL([enable_user32], [true])
+[else]
+  AM_CONDITIONAL([enable_user32], [false])
+[fi]
+
+
 # Platform-specific configuration.
 
 # PC AT.
@@ -148,11 +177,17 @@ m4_include([i386/configfrag.ac])
 # x86_64
 m4_include([x86_64/configfrag.ac])
 
+# aarch64
+m4_include([aarch64/configfrag.ac])
+
 # General options.
 m4_include([configfrag.ac])
 
 # Linux code snarfed into GNU Mach.
 m4_include([linux/configfrag.ac])
+
+# The test suite.
+m4_include([tests/configfrag.ac])
 
 #
 # Compiler features.
@@ -183,7 +218,7 @@ AM_CONDITIONAL([disable_smashing_stack_protector],
 # Output.
 #
 
-AC_CONFIG_HEADER([config.h])
+AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_FILES([Makefile version.c])
 
 #
@@ -226,8 +261,10 @@ dnl     config.status
 dnl ])
 AC_CONFIG_COMMANDS_POST([
   if "$PATCH" -f < "$srcdir"/config.status.dep.patch > /dev/null 2>&1 ||
-     ( cd "$srcdir" && "$PATCH" -f < Makefile.in.dep.patch ||
-       grep "Ugly bootstrap hack to get to-be-generated files created" Makefile.in ) > /dev/null 2>&1
+     ( cd "$srcdir" &&
+       ( "$PATCH" -f < Makefile.in.dep.patch ||
+         "$PATCH" -f < Makefile.in.dep.2.patch ||
+         grep "Ugly bootstrap hack to get to-be-generated files created" Makefile.in ) ) > /dev/null 2>&1
   then] AC_MSG_NOTICE([Applied a patch to work around a deficiency in]
     [Automake.  See `configure.ac' for details.])
   [else] AC_MSG_ERROR([failed to patch using `config.status.dep.patch'.]
@@ -235,6 +272,8 @@ AC_CONFIG_COMMANDS_POST([
   [fi
 ])
 
+
+CFLAGS="$saved_CFLAGS"
 #
 # Fire.
 #

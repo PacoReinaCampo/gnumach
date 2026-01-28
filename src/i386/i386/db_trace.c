@@ -34,9 +34,10 @@
 #include <kern/task.h>
 
 #include <machine/db_machdep.h>
-#include <machine/machspl.h>
+#include <machine/spl.h>
 #include <machine/db_interface.h>
 #include <machine/db_trace.h>
+#include <machine/cpu_number.h>
 #include <i386at/model_dep.h>
 
 #include <ddb/db_access.h>
@@ -53,10 +54,12 @@
  */
 struct db_variable db_regs[] = {
 	{ "cs",	(long *)&ddb_regs.cs,  db_i386_reg_value },
+#if !defined(__x86_64__) || defined(USER32)
 	{ "ds",	(long *)&ddb_regs.ds,  db_i386_reg_value },
 	{ "es",	(long *)&ddb_regs.es,  db_i386_reg_value },
 	{ "fs",	(long *)&ddb_regs.fs,  db_i386_reg_value },
 	{ "gs",	(long *)&ddb_regs.gs,  db_i386_reg_value },
+#endif
 	{ "ss",	(long *)&ddb_regs.ss,  db_i386_reg_value },
 	{ "eax",(long *)&ddb_regs.eax, db_i386_reg_value },
 	{ "ecx",(long *)&ddb_regs.ecx, db_i386_reg_value },
@@ -68,6 +71,16 @@ struct db_variable db_regs[] = {
 	{ "edi",(long *)&ddb_regs.edi, db_i386_reg_value },
 	{ "eip",(long *)&ddb_regs.eip, db_i386_reg_value },
 	{ "efl",(long *)&ddb_regs.efl, db_i386_reg_value },
+#ifdef __x86_64__
+	{ "r8", (long *)&ddb_regs.r8,  db_i386_reg_value },
+	{ "r9", (long *)&ddb_regs.r9,  db_i386_reg_value },
+	{ "r10",(long *)&ddb_regs.r10, db_i386_reg_value },
+	{ "r11",(long *)&ddb_regs.r11, db_i386_reg_value },
+	{ "r12",(long *)&ddb_regs.r12, db_i386_reg_value },
+	{ "r13",(long *)&ddb_regs.r13, db_i386_reg_value },
+	{ "r14",(long *)&ddb_regs.r14, db_i386_reg_value },
+	{ "r15",(long *)&ddb_regs.r15, db_i386_reg_value },
+#endif
 };
 struct db_variable *db_eregs = db_regs + sizeof(db_regs)/sizeof(db_regs[0]);
 
@@ -114,7 +127,7 @@ struct i386_kregs {
 	{ 0 },
 };
 
-long *
+static long *
 db_lookup_i386_kreg(
 	const char *name,
 	const long *kregp)
@@ -147,7 +160,7 @@ db_i386_reg_value(
 	    if (thread == current_thread()) {
 		if (ddb_regs.cs & 0x3)
 		    dp = vp->valuep;
-		else if (ON_INT_STACK(ddb_regs.ebp))
+		else if (ON_INT_STACK(ddb_regs.ebp, cpu_number()))
 		    db_error("cannot get/set user registers in nested interrupt\n");
 	    }
 	} else {
@@ -182,7 +195,7 @@ db_i386_reg_value(
 	    *valuep = *dp;
 }
 
-void
+static void
 db_find_trace_symbols(void)
 {
 	db_expr_t	value;
@@ -210,7 +223,11 @@ db_find_trace_symbols(void)
  */
 const int db_numargs_default = 5;
 
-int
+#ifdef __x86_64
+/* Args are in registers */
+#define db_numargs(fp, task) -1
+#else
+static int
 db_numargs(
 	struct i386_frame *fp,
 	task_t task)
@@ -236,6 +253,7 @@ db_numargs(
 	}
 	return args;
 }
+#endif
 
 struct interrupt_frame {
 	struct i386_frame *if_frame;	/* point to next frame */
@@ -261,10 +279,11 @@ struct interrupt_frame {
  *   It might be possible to dig out from the next frame up the name
  *   of the function that faulted, but that could get hairy.
  */
-void
+static void
 db_nextframe(
 	struct i386_frame **lfp,	/* in/out */
 	struct i386_frame **fp,		/* in/out */
+	db_addr_t	  *sp,		/* out */
 	db_addr_t	  *ip,		/* out */
 	long 		  frame_type,	/* in */
 	const thread_t	  thread)	/* in */
@@ -281,11 +300,19 @@ db_nextframe(
 	     */
 	    saved_regs = (struct i386_saved_state *)
 		db_get_task_value((long)&((*fp)->f_arg0),sizeof(long),FALSE,task);
-	    db_printf(">>>>> %s (%d) at ",
+	    db_printf(">>>>> %s (%d)",
 			trap_name(saved_regs->trapno), saved_regs->trapno);
+	    if (saved_regs->trapno == T_PAGE_FAULT)
+		db_printf(" for %s%s%s %lx",
+			saved_regs->err & T_PF_PROT ? "P" : "",
+			saved_regs->err & T_PF_WRITE ? "W" : "",
+			saved_regs->err & T_PF_USER ? "U" : "",
+			lintokv(saved_regs->cr2));
+	    db_printf(" at ");
 	    db_task_printsym(saved_regs->eip, DB_STGY_PROC, task);
 	    db_printf(" <<<<<\n");
 	    *fp = (struct i386_frame *)saved_regs->ebp;
+	    *sp = (db_addr_t)saved_regs->uesp;
 	    *ip = (db_addr_t)saved_regs->eip;
 	    break;
 	case INTERRUPT:
@@ -296,6 +323,7 @@ db_nextframe(
 	    db_printf(">>>>> interrupt at ");
 	    ifp = (struct interrupt_frame *)(*lfp);
 	    *fp = ifp->if_frame;
+	    *sp = (db_addr_t) ifp->if_frame;
 	    if (ifp->if_iretaddr == db_return_to_iret_symbol_value)
 		*ip = ((struct i386_interrupt_state *) ifp->if_edx)->eip;
 	    else
@@ -306,6 +334,7 @@ db_nextframe(
 	case SYSCALL:
 	    if (thread != THREAD_NULL && thread->pcb) {
 		*ip = (db_addr_t) thread->pcb->iss.eip;
+		*sp = (db_addr_t) thread->pcb->iss.uesp;
 		*fp = (struct i386_frame *) thread->pcb->iss.ebp;
 		break;
 	    }
@@ -317,6 +346,7 @@ db_nextframe(
 	    *lfp = *fp;
 	    *fp = (struct i386_frame *)
 		db_get_task_value((long)&(*fp)->f_frame, sizeof(long), FALSE, task);
+	    *sp = (db_addr_t) *fp;
 	    break;
 	}
 }
@@ -333,7 +363,7 @@ db_stack_trace_cmd(
 {
 	boolean_t	trace_thread = FALSE;
 	struct i386_frame *frame;
-	db_addr_t	callpc;
+	db_addr_t	callpc, sp;
 	int		flags = 0;
 	thread_t	th;
 
@@ -351,6 +381,7 @@ db_stack_trace_cmd(
 
 	if (!have_addr && !trace_thread) {
 	    frame = (struct i386_frame *)ddb_regs.ebp;
+	    sp = (db_addr_t)ddb_regs.uesp;
 	    callpc = (db_addr_t)ddb_regs.eip;
 	    th = current_thread();
 	} else if (trace_thread) {
@@ -369,6 +400,7 @@ db_stack_trace_cmd(
 	    }
 	    if (th == current_thread()) {
 	        frame = (struct i386_frame *)ddb_regs.ebp;
+	        sp = (db_addr_t)ddb_regs.uesp;
 	        callpc = (db_addr_t)ddb_regs.eip;
 	    } else {
 		if (th->pcb == 0) {
@@ -385,23 +417,26 @@ db_stack_trace_cmd(
 		    db_printf("\n");
 
 		    frame = (struct i386_frame *) (iss->ebp);
+		    sp = (db_addr_t) (iss->uesp);
 		    callpc = (db_addr_t) (iss->eip);
 		} else {
 		    struct i386_kernel_state *iks;
 		    iks = STACK_IKS(th->kernel_stack);
 		    frame = (struct i386_frame *) (iks->k_ebp);
+		    sp = (db_addr_t) (iks->k_esp);
 		    callpc = (db_addr_t) (iks->k_eip);
 	        }
 	    }
 	} else {
 	    frame = (struct i386_frame *)addr;
+	    sp = (db_addr_t)addr;
 	    th = (db_default_thread)? db_default_thread: current_thread();
 	    callpc = (db_addr_t)db_get_task_value((long)&frame->f_retaddr, sizeof(long),
 						  FALSE,
 						  (th == THREAD_NULL) ? TASK_NULL : th->task);
 	}
 
-	db_i386_stack_trace( th, frame, callpc, count, flags );
+	db_i386_stack_trace( th, frame, sp, callpc, count, flags );
 }
 
 
@@ -409,6 +444,7 @@ void
 db_i386_stack_trace(
 	const thread_t	th,
 	struct i386_frame *frame,
+	db_addr_t	sp,
 	db_addr_t	callpc,
 	db_expr_t	count,
 	int		flags)
@@ -489,9 +525,23 @@ db_i386_stack_trace(
 	        db_printf("%s(", name);
 
 	    if (!frame) {
-	        db_printf(")\n");
+		db_printf(")\n");
+	    }
+
+	    if (sp) {
+		unsigned char inst = db_get_task_value(callpc, sizeof(char), FALSE, task);
+		if (inst == 0xc3) {
+		    /* RET, unwind this directly */
+		    callpc = db_get_task_value(sp, sizeof(callpc), FALSE, task);
+		    sp += sizeof(callpc);
+		    continue;
+		}
+	    }
+
+	    if (!frame) {
 		break;
 	    }
+
 	    argp = &frame->f_arg0;
 	    while (narg > 0) {
 		db_printf("%x", db_get_task_value((long)argp,sizeof(long),FALSE,task));
@@ -514,7 +564,7 @@ db_i386_stack_trace(
 	    db_printf("\n");
 
 	next_frame:
-	    db_nextframe(&lastframe, &frame, &callpc, frame_type, th);
+	    db_nextframe(&lastframe, &frame, &sp, &callpc, frame_type, th);
 
 	    if (!INKERNEL(lastframe) ||
 		(!INKERNEL(callpc) && !INKERNEL(frame)))
@@ -532,157 +582,5 @@ db_i386_stack_trace(
 	    }
 	}
 }
-
-#define	CTHREADS_SUPPORT	1
-
-#if	CTHREADS_SUPPORT
-
-thread_t
-db_find_kthread(
-	vm_offset_t	ustack_base,
-	vm_size_t	ustack_top,
-	task_t		task)
-{
-	thread_t thread;
-	if (task == TASK_NULL)
-		task = db_current_task();
-
-	queue_iterate(&task->thread_list, thread, thread_t, thread_list) {
-		vm_offset_t	usp = thread->pcb->iss.uesp/*ebp works*/;
-		if (usp >= ustack_base && usp < ustack_top)
-			return thread;
-	}
-	return THREAD_NULL;
-}
-
-static void db_cproc_state(
-	int	state,
-	char	s[4])
-{
-	if (state == 0) {
-		*s++ = 'R';
-	} else {
-		if (state & 1) *s++ = 'S';
-		if (state & 2) *s++ = 'B';
-		if (state & 4) *s++ = 'C';
-	}
-	*s = 0;
-}
-
-/* offsets in a cproc structure */
-/* TODO: longs? */
-const int db_cproc_next_offset = 0 * 4;
-const int db_cproc_incarnation_offset = 1 * 4;
-const int db_cproc_list_offset = 2 * 4;
-const int db_cproc_wait_offset = 3 * 4;
-const int db_cproc_context_offset = 5 * 4;
-const int db_cproc_state_offset = 7 * 4;
-const int db_cproc_stack_base_offset = 10 * 4 + sizeof(mach_msg_header_t);
-const int db_cproc_stack_size_offset = 11 * 4 + sizeof(mach_msg_header_t);
-
-/* offsets in a cproc_switch context structure */
-const int db_cprocsw_framep_offset = 3 * 4;
-const int db_cprocsw_pc_offset = 4 * 4;
-
-#include <machine/setjmp.h>
-
-extern jmp_buf_t *db_recover;
-
-void db_trace_cproc(
-	vm_offset_t	cproc,
-	thread_t	thread)
-{
-	jmp_buf_t	db_jmpbuf;
-	jmp_buf_t	*prev = db_recover;
-	task_t		task;
-	db_addr_t	pc, fp;
-
-	task = (thread == THREAD_NULL)? TASK_NULL: thread->task;
-
-	if (!_setjmp(db_recover = &db_jmpbuf)) {
-		char pstate[4];
-		unsigned int s, w, n, c, cth;
-
-		s = db_get_task_value(cproc + db_cproc_state_offset, 4, FALSE, task);
-		w = db_get_task_value(cproc + db_cproc_wait_offset, 4, FALSE, task);
-		n = db_get_task_value(cproc + db_cproc_next_offset, 4, FALSE, task);
-		c = db_get_task_value(cproc + db_cproc_context_offset, 4, FALSE, task);
-		cth = db_get_task_value(cproc + db_cproc_incarnation_offset, 4, FALSE, task);
-
-		db_cproc_state(s, pstate);
-
-		db_printf("CThread %x (cproc %x) %s", cth, cproc, pstate);
-		if (w) db_printf(" awaits %x", w);
-		if (n) db_printf(" next %x", n);
-		db_printf("\n");
-
-		if ((s != 0) && (c != 0)) {
-			pc = db_get_task_value(c + db_cprocsw_pc_offset, 4, FALSE, task);
-			fp = c + db_cprocsw_framep_offset;
-		} else {
-			db_addr_t sb;
-			vm_size_t ss;
-
-			sb = db_get_task_value(cproc + db_cproc_stack_base_offset, sizeof(db_expr_t), FALSE, task);
-			ss = db_get_task_value(cproc + db_cproc_stack_size_offset, sizeof(db_expr_t), FALSE, task);
-			db_printf(" Stack base: %x\n", sb);
-			/*
-			 *  Lessee now..
-			 */
-			thread = db_find_kthread(sb, sb+ss, task);
-			if (thread != THREAD_NULL) {
-			    pc = thread->pcb->iss.eip;
-			    fp = thread->pcb->iss.ebp;
-			} else
-			    fp = -1;
-		}
-
-		if (fp != -1)
-			db_i386_stack_trace(thread, (struct i386_frame*)fp, pc,
-						-1, F_USER_TRACE);
-	}
-
-	db_recover = prev;
-}
-
-void db_all_cprocs(
-	const task_t	task,
-	db_expr_t	cproc_list)
-{
-	jmp_buf_t	db_jmpbuf;
-	jmp_buf_t 	*prev = db_recover;
-	thread_t	thread;
-	db_expr_t	cproc, next;
-
-
-	if (task != TASK_NULL) {
-		thread = (thread_t) queue_first(&task->thread_list);
-	} else
-		thread = current_thread();
-
-	if (cproc_list != 0)
-		next = cproc_list;
-	else
-		if (!db_value_of_name("unix::cproc_list", &next)) {
-			db_printf("No cprocs.\n");
-			return;
-		}
-
-
-	while (next) {
-		if (_setjmp(db_recover = &db_jmpbuf))
-			break;
-
-		cproc = db_get_task_value(next, 4, FALSE, TASK_NULL);
-		if (cproc == 0) break;
-		next = cproc + db_cproc_list_offset;
-
-		db_trace_cproc(cproc, thread);
-	}
-
-	db_recover = prev;
-}
-
-#endif	/* CTHREADS_SUPPORT */
 
 #endif /* MACH_KDB */

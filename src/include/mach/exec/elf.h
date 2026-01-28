@@ -48,6 +48,22 @@ typedef struct {
   Elf32_Half		e_shstrndx;
 } Elf32_Ehdr;
 
+typedef struct {
+  unsigned char	e_ident[EI_NIDENT];	/* Id bytes */
+  Elf64_Half	e_type;			/* file type */
+  Elf64_Half	e_machine;		/* machine type */
+  Elf64_Word	e_version;		/* version number */
+  Elf64_Addr	e_entry;		/* entry point */
+  Elf64_Off	e_phoff;		/* Program hdr offset */
+  Elf64_Off	e_shoff;		/* Section hdr offset */
+  Elf64_Word	e_flags;		/* Processor flags */
+  Elf64_Half	e_ehsize;		/* sizeof ehdr */
+  Elf64_Half	e_phentsize;		/* Program header entry size */
+  Elf64_Half	e_phnum;		/* Number of program headers */
+  Elf64_Half	e_shentsize;		/* Section header entry size */
+  Elf64_Half	e_shnum;		/* Number of section headers */
+  Elf64_Half	e_shstrndx;		/* String table index */
+} Elf64_Ehdr;
 
 /* e_ident[] identification indexes - figure 4-4, page 4-7 */
   
@@ -104,6 +120,7 @@ typedef struct {
 #define EM_SPARC64	11
 #define EM_PARISC	15
 #define EM_PPC		20
+#define EM_X86_64	62
 
 /* version - page 4-6 */
 
@@ -134,6 +151,19 @@ typedef struct {
   Elf32_Word		sh_addralign;
   Elf32_Word		sh_entsize;
 } Elf32_Shdr;
+
+typedef struct elf64_shdr {
+  Elf64_Word		sh_name;
+  Elf64_Word		sh_type;
+  Elf64_Xword		sh_flags;
+  Elf64_Addr		sh_addr;
+  Elf64_Off		sh_offset;
+  Elf64_Xword		sh_size;
+  Elf64_Word		sh_link;
+  Elf64_Word		sh_info;
+  Elf64_Xword		sh_addralign;
+  Elf64_Xword		sh_entsize;
+} Elf64_Shdr;
 
 /* section types - page 4-15, figure 4-9 */
 
@@ -173,11 +203,28 @@ typedef struct
     Elf32_Half    st_shndx;
 } Elf32_Sym;
 
+typedef struct elf64_sym {
+    Elf64_Word	st_name;
+    unsigned char	st_info;
+    unsigned char	st_other;
+    Elf64_Half	st_shndx;
+    Elf64_Addr	st_value;
+    Elf64_Xword	st_size;
+} Elf64_Sym;
+
+#ifdef __LP64__
+#define Elf_Sym Elf64_Sym
+#define Elf_Shdr Elf64_Shdr
+#else
+#define Elf_Sym Elf32_Sym
+#define Elf_Shdr Elf32_Shdr
+#endif
+
 /* symbol type and binding attributes - page 4-26 */
 
-#define ELF32_ST_BIND(i)    ((i) >> 4)
-#define ELF32_ST_TYPE(i)    ((i) & 0xf)
-#define ELF32_ST_INFO(b,t)  (((b)<<4)+((t)&0xf))
+#define ELF_ST_BIND(i)    ((i) >> 4)
+#define ELF_ST_TYPE(i)    ((i) & 0xf)
+#define ELF_ST_INFO(b,t)  (((b)<<4)+((t)&0xf))
 
 /* symbol binding - page 4-26, figure 4-16 */
 
@@ -233,6 +280,17 @@ typedef struct {
   Elf32_Word		p_align;
 } Elf32_Phdr;
 
+typedef struct {
+  Elf64_Word	p_type;		/* entry type */
+  Elf64_Word	p_flags;	/* flags */
+  Elf64_Off	p_offset;	/* offset */
+  Elf64_Addr	p_vaddr;	/* virtual address */
+  Elf64_Addr	p_paddr;	/* physical address */
+  Elf64_Xword	p_filesz;	/* file size */
+  Elf64_Xword	p_memsz;	/* memory size */
+  Elf64_Xword	p_align;	/* memory & file alignment */
+} Elf64_Phdr;
+
 /* segment types - page 5-3, figure 5-2 */
 
 #define PT_NULL		0
@@ -242,6 +300,7 @@ typedef struct {
 #define PT_NOTE		4
 #define PT_SHLIB	5
 #define PT_PHDR		6
+#define PT_GNU_STACK	0x6474e551
 
 #define PT_LOPROC	0x70000000
 #define PT_HIPROC	0x7fffffff
@@ -290,6 +349,14 @@ typedef struct {
 #define DT_DEBUG	21
 #define DT_TEXTREL	22
 #define DT_JMPREL	23
+
+#if defined(__LP64__) && ! defined(USER32)
+typedef Elf64_Ehdr Elf_Ehdr;
+typedef Elf64_Phdr Elf_Phdr;
+#else
+typedef Elf32_Ehdr Elf_Ehdr;
+typedef Elf32_Phdr Elf_Phdr;
+#endif
 
 /*
  *	Bootstrap doesn't need machine dependent extensions.

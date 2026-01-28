@@ -21,6 +21,7 @@
 #include <machine/pmap.h>
 #include <machine/ipl.h>
 #include <kern/kalloc.h>
+#include <kern/sched_prim.h>
 #include <stdarg.h>
 #include <string.h>
 #include <alloca.h>
@@ -36,7 +37,7 @@
 
 /* Hypervisor part */
 
-decl_simple_lock_data(static, lock);
+def_simple_lock_data(static, lock);
 
 static struct xenstore_domain_interface *store;
 

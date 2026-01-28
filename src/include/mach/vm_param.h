@@ -59,9 +59,7 @@
  *	PAGE_SIZE and PAGE_MASK should also be variables
  *	so their values don't have to be constantly recomputed.)
  */
-#ifndef PAGE_SHIFT
-#error mach/machine/vm_param.h needs to define PAGE_SHIFT.
-#endif
+#ifdef PAGE_SHIFT
 
 #ifndef PAGE_SIZE
 #define PAGE_SIZE (1 << PAGE_SHIFT)
@@ -88,11 +86,17 @@
 #define round_page(x)	((vm_offset_t)((((vm_offset_t)(x)) + PAGE_MASK) & ~PAGE_MASK))
 #define trunc_page(x)	((vm_offset_t)(((vm_offset_t)(x)) & ~PAGE_MASK))
 
+#define round_phys(x)	((phys_addr_t)((((phys_addr_t)(x)) + PAGE_MASK) & ~PAGE_MASK))
+#define trunc_phys(x)	((phys_addr_t)(((phys_addr_t)(x)) & ~PAGE_MASK))
+
 /*
  *	Determine whether an address is page-aligned, or a count is
  *	an exact page multiple.
  */
 
 #define	page_aligned(x)	((((vm_offset_t) (x)) & PAGE_MASK) == 0)
+#define	phys_aligned(x)	((((phys_addr_t) (x)) & PAGE_MASK) == 0)
+
+#endif	/* PAGE_SHIFT */
 
 #endif	/* _MACH_VM_PARAM_H_ */

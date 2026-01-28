@@ -58,7 +58,17 @@ userprefix USERPREFIX;
 serverprefix SERVERPREFIX;
 #endif
 
-type mach_port_status_t = struct[9] of integer_t;
+type mach_port_status_t = struct {
+   mach_port_name_t	mps_pset;	/* containing port set */
+   mach_port_seqno_t	mps_seqno;	/* sequence number */
+   mach_port_mscount_t	mps_mscount;	/* make-send count */
+   mach_port_msgcount_t	mps_qlimit;	/* queue limit */
+   mach_port_msgcount_t	mps_msgcount;	/* number in the queue */
+   mach_port_rights_t mps_sorights;	/* how many send-once rights */
+   boolean_t	mps_srights;	/* do send rights exist? */
+   boolean_t	mps_pdrequest;	/* port-deleted requested? */
+   boolean_t	mps_nsrequest;	/* no-senders requested? */
+};
 
 type task_t = mach_port_t
 		ctype: mach_port_t
@@ -110,9 +120,40 @@ type ipc_space_t = mach_port_t
 #endif	/* KERNEL_SERVER */
 		;
 
-type vm_address_t = natural_t;
-type vm_offset_t = natural_t;
-type vm_size_t = natural_t;
+#if defined(KERNEL) && defined(USER32)
+type rpc_uintptr_t = uint32_t;
+type rpc_vm_size_t = uint32_t;
+#else /* KERNEL and USER32 */
+type rpc_uintptr_t = uintptr_t;
+type rpc_vm_size_t = uintptr_t;
+#endif /* KERNEL_SERVER and USER32 */
+
+type rpc_vm_offset_t = rpc_vm_size_t;
+
+type vm_address_t = rpc_vm_size_t
+#if defined(KERNEL_SERVER)
+    intran: vm_address_t convert_vm_from_user(rpc_vm_address_t)
+    outtran: rpc_vm_address_t convert_vm_to_user(vm_address_t)
+#elif defined(KERNEL_USER)
+    ctype: rpc_vm_address_t
+#endif
+    ;
+type vm_offset_t = rpc_vm_offset_t
+#if defined(KERNEL_SERVER)
+    intran: vm_offset_t convert_vm_from_user(rpc_vm_offset_t)
+    outtran: rpc_vm_offset_t convert_vm_to_user(vm_offset_t)
+#elif defined(KERNEL_USER)
+    ctype: rpc_vm_offset_t
+#endif
+    ;
+type vm_size_t = rpc_vm_size_t
+#if defined(KERNEL_SERVER)
+    intran: vm_size_t convert_vm_from_user(rpc_vm_size_t)
+    outtran: rpc_vm_size_t convert_vm_to_user(vm_size_t)
+#elif defined(KERNEL_USER)
+    ctype: rpc_vm_size_t
+#endif
+;
 type vm_prot_t = int;
 type vm_inherit_t = int;
 type vm_statistics_data_t = struct[13] of integer_t;
@@ -121,14 +162,8 @@ type vm_machine_attribute_val_t = int;
 type vm_sync_t = int;
 
 type thread_info_t		= array[*:1024] of integer_t;
-type thread_basic_info_data_t	= struct[11] of integer_t;
-type thread_sched_info_data_t	= struct[7] of integer_t;
 
 type task_info_t		= array[*:1024] of integer_t;
-type task_basic_info_data_t	= struct[8] of integer_t;
-type task_events_info		= struct[7] of natural_t;
-type task_thread_times_info_data_t = struct[4] of integer_t;
-
 
 type memory_object_t = mach_port_t
 		ctype: mach_port_t
@@ -168,9 +203,6 @@ type memory_object_name_t = mach_port_t
 type memory_object_copy_strategy_t = int;
 type memory_object_return_t = int;
 
-type machine_info_data_t = struct[5] of integer_t;
-type machine_slot_data_t = struct[8] of integer_t;
-
 type host_t = mach_port_t
 		ctype: mach_port_t
 #if	KERNEL_SERVER
@@ -187,10 +219,6 @@ type host_priv_t = mach_port_t
 		;
 
 type host_info_t 			= array[*:1024] of integer_t;
-type host_basic_info_data_t		= struct[5] of integer_t;
-type host_sched_info_data_t		= struct[2] of integer_t;
-type host_load_info_data_t		= struct[6] of integer_t;
-
 
 type processor_t = mach_port_t
 		ctype: mach_port_t
@@ -202,8 +230,6 @@ type processor_t = mach_port_t
 
 type processor_array_t 		= ^array[] of processor_t;
 type processor_info_t		= array[*:1024] of integer_t;
-type processor_basic_info_data_t = struct[5] of integer_t;
-
 
 type processor_set_t = mach_port_t
 		ctype: mach_port_t
@@ -228,15 +254,28 @@ type processor_set_name_t = mach_port_t
 type processor_set_name_array_t = ^array[] of processor_set_name_t;
 
 type processor_set_info_t	= array[*:1024] of integer_t;
-type processor_set_basic_info_data_t = struct[5] of integer_t;
-type processor_set_sched_info_data_t = struct[2] of integer_t;
-
 
 type kernel_version_t		= (MACH_MSG_TYPE_STRING, 512*8);
+type new_kernel_version_t = c_string[512]
+  ctype: kernel_version_t;
 
-type kernel_boot_info_t		= (MACH_MSG_TYPE_STRING, 4096*8);
+type rpc_time_value_t		= struct {
+  rpc_long_integer_t seconds;
+  integer_t microseconds;
+};
+type time_value_t = rpc_time_value_t
+#if defined(KERNEL_SERVER)
+    intran: time_value_t convert_time_value_from_user(rpc_time_value_t)
+    outtran: rpc_time_value_t convert_time_value_to_user(time_value_t)
+#elif defined(KERNEL_USER)
+    ctype: rpc_time_value_t
+#endif
+    ;
 
-type time_value_t		= struct[2] of integer_t;
+type time_value64_t		= struct {
+  int64_t seconds;
+  int64_t nanoseconds;
+};
 
 type emulation_vector_t		= ^array[] of vm_offset_t;
 

@@ -39,16 +39,19 @@
 #include <kern/lock.h>
 #include <kern/host.h>
 #include <kern/ipc_tt.h>
+#include <kern/machine.h>
 #include <kern/processor.h>
 #include <kern/sched.h>
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/ipc_host.h>
 #include <ipc/ipc_port.h>
+#include <machine/mp_desc.h>
 
 #if	MACH_HOST
 #include <kern/slab.h>
 struct kmem_cache pset_cache;
+struct processor_set *slave_pset;
 #endif	/* MACH_HOST */
 
 
@@ -58,14 +61,12 @@ struct kmem_cache pset_cache;
 int	master_cpu;
 
 struct processor_set default_pset;
-struct processor processor_array[NCPUS];
 
 queue_head_t		all_psets;
 int			all_psets_count;
-decl_simple_lock_data(, all_psets_lock);
+def_simple_lock_data(, all_psets_lock);
 
 processor_t	master_processor;
-processor_t	processor_ptr[NCPUS];
 
 /*
  *	Bootstrap the processor/pset system so the scheduler can run.
@@ -75,14 +76,12 @@ void pset_sys_bootstrap(void)
 	int	i;
 
 	pset_init(&default_pset);
-	default_pset.empty = FALSE;
 	for (i = 0; i < NCPUS; i++) {
 		/*
 		 *	Initialize processor data structures.
-		 *	Note that cpu_to_processor(i) is processor_ptr[i].
+		 *	Note that cpu_to_processor is processor_ptr.
 		 */
-		processor_ptr[i] = &processor_array[i];
-		processor_init(processor_ptr[i], i);
+		processor_init(processor_ptr(i), i);
 	}
 	master_processor = cpu_to_processor(master_cpu);
 	queue_init(&all_psets);
@@ -90,7 +89,6 @@ void pset_sys_bootstrap(void)
 	queue_enter(&all_psets, &default_pset, processor_set_t, all_psets);
 	all_psets_count = 1;
 	default_pset.active = TRUE;
-	default_pset.empty = FALSE;
 
 	/*
 	 *	Note: the default_pset has a max_priority of BASEPRI_USER.
@@ -125,6 +123,8 @@ void pset_sys_init(void)
 		ipc_processor_init(processor);
 	    }
 	}
+
+	processor_set_create(&realhost, &slave_pset, &slave_pset);
 }
 #endif	/* MACH_HOST */
 
@@ -167,7 +167,7 @@ void pset_init(
 	pset->set_quantum = min_quantum;
 #if	NCPUS > 1
 	pset->quantum_adj_index = 0;
-	simple_lock_init(&pset->quantum_adj_lock);
+	simple_lock_init_irq(&pset->quantum_adj_lock);
 
 	for (i = 0; i <= NCPUS; i++) {
 	    pset->machine_quantum[i] = min_quantum;
@@ -243,6 +243,7 @@ void pset_add_processor(
 	queue_enter(&pset->processors, processor, processor_t, processors);
 	processor->processor_set = pset;
 	pset->processor_count++;
+	pset->empty = FALSE;
 	quantum_set(pset);
 }
 
@@ -451,11 +452,7 @@ kern_return_t processor_start(
 {
     	if (processor == PROCESSOR_NULL)
 		return KERN_INVALID_ARGUMENT;
-#if	NCPUS > 1
-	return cpu_start(processor->slot_num);
-#else	/* NCPUS > 1 */
 	return KERN_FAILURE;
-#endif	/* NCPUS > 1 */
 }
 
 kern_return_t processor_exit(
@@ -843,7 +840,7 @@ processor_set_policy_disable(
  *
  *	Common internals for processor_set_{threads,tasks}
  */
-kern_return_t
+static kern_return_t
 processor_set_things(
 	processor_set_t	pset,
 	mach_port_t	**thing_list,

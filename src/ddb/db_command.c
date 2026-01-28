@@ -62,6 +62,7 @@
 #include <ipc/ipc_port.h> /* 4proto */
 
 #include <vm/vm_print.h>
+#include <vm/vm_page.h>
 #include <ipc/ipc_print.h>
 #include <ipc/mach_port.h>
 #include <kern/lock.h>
@@ -95,11 +96,11 @@ boolean_t	db_ed_style = TRUE;
 /*
  * Search for command prefix.
  */
-int
-db_cmd_search(name, table, cmdp)
-	const char *		name;
-	const struct db_command	*table;
-	const struct db_command	**cmdp;	/* out */
+static int
+db_cmd_search(
+	const char *		name,
+	const struct db_command	*table,
+	const struct db_command	**cmdp	/* out */)
 {
 	const struct db_command	*cmd;
 	int		result = CMD_NONE;
@@ -142,9 +143,8 @@ db_cmd_search(name, table, cmdp)
 	return (result);
 }
 
-void
-db_cmd_list(table)
-	const struct db_command *table;
+static void
+db_cmd_list(const struct db_command *table)
 {
 	const struct db_command *cmd;
 
@@ -154,12 +154,12 @@ db_cmd_list(table)
 	}
 }
 
-void
+static void
 db_command(
-	struct db_command	**last_cmdp,	/* IN_OUT */
+	const struct db_command	**last_cmdp,	/* IN_OUT */
 	struct db_command	*cmd_table)
 {
-	struct db_command	*cmd;
+	const struct db_command	*cmd = NULL;
 	int		t;
 	char		modif[TOK_STRING_SIZE];
 	db_expr_t	addr, count;
@@ -266,7 +266,7 @@ db_command(
 	    }
 	}
 	*last_cmdp = cmd;
-	if (cmd != 0) {
+	if (cmd != NULL) {
 	    /*
 	     * Execute the command.
 	     */
@@ -294,9 +294,9 @@ db_command(
 	}
 }
 
-void
+static void
 db_command_list(
-	struct db_command	**last_cmdp,	/* IN_OUT */
+	const struct db_command	**last_cmdp,	/* IN_OUT */
 	struct db_command	*cmd_table)
 {
 	do {
@@ -308,28 +308,30 @@ db_command_list(
 struct db_command db_show_all_cmds[] = {
 	{ "tasks",	db_show_all_tasks,	0,	0 },
 	{ "threads",	db_show_all_threads,	0,	0 },
-	{ "slocks",	db_show_all_slocks,	0,	0 },
+	{ "slocks",	(db_command_fun_t)db_show_all_slocks,	0,	0 },
+	{ "runqs",	(db_command_fun_t)db_show_all_runqs,	0,	0 },
 	{ (char *)0 }
 };
 
 struct db_command db_show_cmds[] = {
 	{ "all",	0,			0,	db_show_all_cmds },
-	{ "registers",	db_show_regs,		0,	0 },
+	{ "registers",	(db_command_fun_t)db_show_regs,		0,	0 },
 	{ "breaks",	db_listbreak_cmd, 	0,	0 },
 	{ "watches",	db_listwatch_cmd, 	0,	0 },
 	{ "thread",	db_show_one_thread,	0,	0 },
 	{ "task",	db_show_one_task,	0,	0 },
 	{ "macro",	db_show_macro,		CS_OWN, 0 },
 	{ "map",	vm_map_print,		0,	0 },
-	{ "object",	vm_object_print,	0,	0 },
-	{ "page",	vm_page_print,		0,	0 },
-	{ "copy",	vm_map_copy_print,	0,	0 },
-	{ "port",	ipc_port_print,		0,	0 },
-	{ "pset",	ipc_pset_print,		0,	0 },
-	{ "kmsg",	ipc_kmsg_print,		0,	0 },
-	{ "msg",	ipc_msg_print,		0,	0 },
+	{ "object",	(db_command_fun_t)vm_object_print,	0,	0 },
+	{ "page",	(db_command_fun_t)vm_page_print,		0,	0 },
+	{ "copy",	(db_command_fun_t)vm_map_copy_print,	0,	0 },
+	{ "port",	(db_command_fun_t)ipc_port_print,		0,	0 },
+	{ "pset",	(db_command_fun_t)ipc_pset_print,		0,	0 },
+	{ "kmsg",	(db_command_fun_t)ipc_kmsg_print,		0,	0 },
+	{ "msg",	(db_command_fun_t)ipc_msg_print,		0,	0 },
 	{ "ipc_port",	db_show_port_id,	0,	0 },
-	{ "slabinfo",	db_show_slab_info,	0,	0 },
+	{ "slabinfo",	(db_command_fun_t)db_show_slab_info,	0,	0 },
+	{ "vmstat",	(db_command_fun_t)db_show_vmstat,		0,	0 },
 	{ (char *)0, }
 };
 
@@ -355,13 +357,14 @@ struct db_command db_command_table[] = {
   /* this must be the first entry, if it exists */
 	{ "machine",    0,                      0,     		0},
 #endif
-	{ "print",	db_print_cmd,		CS_OWN,		0 },
+	{ "print",	(db_command_fun_t)db_print_cmd,		CS_OWN,		0 },
 	{ "examine",	db_examine_cmd,		CS_MORE|CS_SET_DOT, 0 },
 	{ "x",		db_examine_cmd,		CS_MORE|CS_SET_DOT, 0 },
 	{ "xf",		db_examine_forward,	CS_SET_DOT,	0 },
 	{ "xb",		db_examine_backward,	CS_SET_DOT,	0 },
+	{ "whatis",	db_whatis_cmd,		CS_MORE,	0 },
 	{ "search",	db_search_cmd,		CS_OWN|CS_SET_DOT, 0 },
-	{ "set",	db_set_cmd,		CS_OWN,		0 },
+	{ "set",	(db_command_fun_t)db_set_cmd,		CS_OWN,		0 },
 	{ "write",	db_write_cmd,		CS_MORE|CS_SET_DOT, 0 },
 	{ "w",		db_write_cmd,		CS_MORE|CS_SET_DOT, 0 },
 	{ "delete",	db_delete_cmd,		CS_OWN,		0 },
@@ -378,14 +381,14 @@ struct db_command db_command_table[] = {
 	{ "match",	db_trace_until_matching_cmd,0,		0 },
 	{ "trace",	db_stack_trace_cmd,	0,		0 },
 	{ "cond",	db_cond_cmd,		CS_OWN,	 	0 },
-	{ "call",	db_fncall,		CS_OWN,		0 },
+	{ "call",	(db_command_fun_t)db_fncall,		CS_OWN,		0 },
 	{ "macro",	db_def_macro_cmd,	CS_OWN,	 	0 },
 	{ "dmacro",	db_del_macro_cmd,	CS_OWN,		0 },
 	{ "show",	0,			0,	db_show_cmds },
 	{ "debug",	0,			0,	db_debug_cmds },
-	{ "reset",	db_reset_cpu,		0,		0 },
-	{ "reboot",	db_reset_cpu,		0,		0 },
-	{ "halt",	db_halt_cpu,		0,		0 },
+	{ "reset",	(db_command_fun_t)db_reset_cpu,		0,		0 },
+	{ "reboot",	(db_command_fun_t)db_reset_cpu,		0,		0 },
+	{ "halt",	(db_command_fun_t)db_halt_cpu,		0,		0 },
 	{ (char *)0, }
 };
 
@@ -402,7 +405,7 @@ void db_machine_commands_install(struct db_command *ptr)
 #endif /* DB_MACHINE_COMMANDS */
 
 
-struct db_command	*db_last_command = 0;
+const struct db_command	*db_last_command = 0;
 
 void
 db_help_cmd(void)
@@ -468,8 +471,7 @@ db_exec_cmd_nest(
 	return(db_cmd_loop_done == FALSE);
 }
 
-void db_error(s)
-	const char *s;
+void db_error(const char *s)
 {
 	extern int db_macro_level;
 
@@ -500,7 +502,11 @@ db_fncall(void)
 	db_expr_t	args[MAXARGS];
 	int		nargs = 0;
 	db_expr_t	retval;
-	db_expr_t	(*func)();
+	typedef db_expr_t(*function_t)(db_expr_t, db_expr_t, db_expr_t,
+			db_expr_t, db_expr_t, db_expr_t,
+			db_expr_t, db_expr_t, db_expr_t,
+			db_expr_t);
+	function_t func;
 	int		t;
 
 	if (!db_expression(&fn_addr)) {
@@ -508,7 +514,7 @@ db_fncall(void)
 	    db_flush_lex();
 	    return;
 	}
-	func = (db_expr_t (*) ()) fn_addr;
+	func = (function_t) fn_addr;
 
 	t = db_read_token();
 	if (t == tLPAREN) {
@@ -545,9 +551,9 @@ db_fncall(void)
 }
 
 boolean_t __attribute__ ((pure))
-db_option(modif, option)
-	const char	*modif;
-	int		option;
+db_option(
+	const char	*modif,
+	int		option)
 {
 	const char *p;
 

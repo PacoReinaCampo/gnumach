@@ -78,8 +78,7 @@
  */
 
 ipc_kmsg_t
-ipc_kobject_server(request)
-	ipc_kmsg_t request;
+ipc_kobject_server(ipc_kmsg_t request)
 {
 	mach_msg_size_t reply_size = ikm_less_overhead(8192);
 	ipc_kmsg_t reply;
@@ -102,13 +101,14 @@ ipc_kobject_server(request)
 #define	InP	((mach_msg_header_t *) &request->ikm_header)
 #define	OutP	((mig_reply_header_t *) &reply->ikm_header)
 
-	    static mach_msg_type_t RetCodeType = {
-		/* msgt_name = */		MACH_MSG_TYPE_INTEGER_32,
-		/* msgt_size = */		32,
-		/* msgt_number = */		1,
-		/* msgt_inline = */		TRUE,
-		/* msgt_longform = */		FALSE,
-		/* msgt_unused = */		0
+	    static const mach_msg_type_t RetCodeType = {
+	        .msgt_name = MACH_MSG_TYPE_INTEGER_32,
+	        .msgt_size = 32,
+	        .msgt_number = 1,
+	        .msgt_inline = TRUE,
+	        .msgt_longform = FALSE,
+	        .msgt_deallocate = FALSE,
+	        .msgt_unused = 0
 	    };
 	    OutP->Head.msgh_bits =
 		MACH_MSGH_BITS(MACH_MSGH_BITS_LOCAL(InP->msgh_bits), 0);
@@ -238,11 +238,7 @@ ipc_kobject_server(request)
 		/* like ipc_kmsg_put, but without the copyout */
 
 		ikm_check_initialized(request, request->ikm_size);
-		if ((request->ikm_size == IKM_SAVED_KMSG_SIZE) &&
-		    (ikm_cache() == IKM_NULL))
-			ikm_cache() = request;
-		else
-			ikm_free(request);
+		ikm_cache_free(request);
 	} else {
 		/*
 		 *	The message contents of the request are intact.
@@ -286,16 +282,29 @@ ipc_kobject_server(request)
  */
 
 void
-ipc_kobject_set(port, kobject, type)
-	ipc_port_t port;
-	ipc_kobject_t kobject;
-	ipc_kobject_type_t type;
+ipc_kobject_set(ipc_port_t port, ipc_kobject_t kobject, ipc_kobject_type_t type)
 {
 	ip_lock(port);
+	ipc_kobject_set_locked(port, kobject, type);
+	ip_unlock(port);
+}
+
+/*
+ *	Routine:	ipc_kobject_set_locked
+ *	Purpose:
+ *		As per ipc_kobject_set but see Conditions.
+ *	Conditions:
+ *		Port must be locked by the caller and remains locked after
+ *              return.  The port must be active.
+ */
+
+void
+ipc_kobject_set_locked(ipc_port_t port, ipc_kobject_t kobject,
+		       ipc_kobject_type_t type)
+{
 	assert(ip_active(port));
 	port->ip_bits = (port->ip_bits &~ IO_BITS_KOTYPE) | type;
 	port->ip_kobject = kobject;
-	ip_unlock(port);
 }
 
 /*
@@ -327,7 +336,7 @@ ipc_kobject_destroy(
 
 	    default:
 #if	MACH_ASSERT
-		printf("ipc_kobject_destroy: port 0x%p, kobj 0x%lx, type %d\n",
+		printf("ipc_kobject_destroy: port 0x%p, kobj 0x%zd, type %d\n",
 		       port, port->ip_kobject, ip_kotype(port));
 #endif	/* MACH_ASSERT */
 		break;
@@ -341,9 +350,8 @@ ipc_kobject_destroy(
  */
 
 boolean_t
-ipc_kobject_notify(request_header, reply_header)
-	mach_msg_header_t *request_header;
-	mach_msg_header_t *reply_header;
+ipc_kobject_notify(mach_msg_header_t *request_header,
+	mach_msg_header_t *reply_header)
 {
 	ipc_port_t port = (ipc_port_t) request_header->msgh_remote_port;
 

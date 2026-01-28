@@ -41,7 +41,6 @@
 #include <mach/kern_return.h>
 #include <mach/port.h>
 #include <mach/processor_info.h>
-#include <kern/cpu_number.h>
 #include <kern/lock.h>
 #include <kern/queue.h>
 #include <kern/sched.h>
@@ -56,7 +55,7 @@ struct processor_set {
 	struct run_queue	runq;		/* runq for this set */
 	queue_head_t		idle_queue;	/* idle processors */
 	int			idle_count;	/* how many ? */
-	decl_simple_lock_data(,	idle_lock)	/* lock for above */
+	decl_simple_lock_data(,	idle_lock)	/* lock for above, shall be taken at splsched only */
 	queue_head_t		processors;	/* all processors here */
 	int			processor_count;	/* how many ? */
 	boolean_t		empty;		/* true if no processors */
@@ -78,7 +77,7 @@ struct processor_set {
 	int			set_quantum;	/* current default quantum */
 #if	NCPUS > 1
 	int			quantum_adj_index; /* runtime quantum adj. */
-	decl_simple_lock_data(,	quantum_adj_lock)  /* lock for above */
+	decl_simple_lock_irq_data(, quantum_adj_lock)  /* lock for above */
 	int			machine_quantum[NCPUS+1]; /* ditto */
 #endif	/* NCPUS > 1 */
 	long			mach_factor;	/* mach_factor */
@@ -86,6 +85,25 @@ struct processor_set {
 	long			sched_load;	/* load avg for scheduler */
 };
 extern struct processor_set	default_pset;
+#if	MACH_HOST
+extern struct processor_set	*slave_pset;
+#endif
+
+#ifdef MACH_LDEBUG
+#define pset_idle_lock()	\
+MACRO_BEGIN \
+	assert_splsched(); \
+	simple_lock_nocheck(&pset->idle_lock); \
+MACRO_END
+#define pset_idle_unlock()	\
+MACRO_BEGIN \
+	assert_splsched(); \
+	simple_unlock_nocheck(&pset->idle_lock); \
+MACRO_END
+#else
+#define pset_idle_lock()	simple_lock_nocheck(&pset->idle_lock)
+#define pset_idle_unlock()	simple_unlock_nocheck(&pset->idle_lock)
+#endif
 
 struct processor {
 	struct run_queue runq;		/* local runq for this processor */
@@ -111,6 +129,9 @@ struct processor {
 };
 typedef struct processor Processor;
 extern struct processor	processor_array[NCPUS];
+
+#include <kern/cpu_number.h>
+#include <machine/percpu.h>
 
 /*
  *	Chain of all processor sets.
@@ -195,23 +216,15 @@ extern processor_t	master_processor;
 #define	PROCESSOR_ASSIGN	4	/* Assignment is changing */
 #define PROCESSOR_SHUTDOWN	5	/* Being shutdown */
 
-/*
- *	Use processor ptr array to find current processor's data structure.
- *	This replaces a multiplication (index into processor_array) with
- *	an array lookup and a memory reference.  It also allows us to save
- *	space if processor numbering gets too sparse.
- */
+#define processor_ptr(i)	(&percpu_array[i].processor)
+#define cpu_to_processor	processor_ptr
 
-extern processor_t	processor_ptr[NCPUS];
-
-#define cpu_to_processor(i)	(processor_ptr[i])
-
-#define current_processor()	(processor_ptr[cpu_number()])
+#define current_processor()	(percpu_ptr(struct processor, processor))
 #define current_processor_set()	(current_processor()->processor_set)
 
 /* Compatibility -- will go away */
 
-#define cpu_state(slot_num)	(processor_ptr[slot_num]->state)
+#define cpu_state(slot_num)	(processor_ptr(slot_num)->state)
 #define cpu_idle(slot_num)	(cpu_state(slot_num) == PROCESSOR_IDLE)
 
 /* Useful lock macros */
@@ -221,6 +234,7 @@ extern processor_t	processor_ptr[NCPUS];
 #define	pset_ref_lock(pset)	simple_lock(&(pset)->ref_lock)
 #define	pset_ref_unlock(pset)	simple_unlock(&(pset)->ref_lock)
 
+/* Shall be taken at splsched only */
 #define processor_lock(pr)	simple_lock(&(pr)->lock)
 #define processor_unlock(pr)	simple_unlock(&(pr)->lock)
 
@@ -320,7 +334,6 @@ extern kern_return_t processor_set_threads(
 		natural_t	*count);
 #endif
 
-void processor_doaction(processor_t processor);
 void processor_doshutdown(processor_t processor);
 void quantum_set(processor_set_t pset);
 void pset_init(processor_set_t pset);

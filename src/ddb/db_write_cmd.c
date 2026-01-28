@@ -43,6 +43,7 @@
 #include <ddb/db_output.h>
 #include <ddb/db_sym.h>
 #include <ddb/db_task_thread.h>
+#include <ddb/db_write_cmd.h>
 
 
 
@@ -51,11 +52,11 @@
  */
 /*ARGSUSED*/
 void
-db_write_cmd(address, have_addr, count, modif)
-	db_expr_t	address;
-	boolean_t	have_addr;
-	db_expr_t	count;
-	const char *	modif;
+db_write_cmd(
+	db_expr_t	address,
+	boolean_t	have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	db_addr_t	addr;
 	db_expr_t	old_value;

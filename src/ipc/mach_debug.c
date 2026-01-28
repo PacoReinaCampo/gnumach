@@ -39,9 +39,9 @@
 #include <mach/port.h>
 #include <mach/machine/vm_types.h>
 #include <mach/vm_param.h>
-#include <mach_debug/ipc_info.h>
 #include <mach_debug/hash_info.h>
 #include <kern/host.h>
+#include <kern/mach_debug.server.h>
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
 #include <ipc/ipc_space.h>
@@ -70,7 +70,7 @@
 kern_return_t
 mach_port_get_srights(
 	ipc_space_t		space,
-	mach_port_t		name,
+	mach_port_name_t	name,
 	mach_port_rights_t	*srightsp)
 {
 	ipc_port_t port;
@@ -190,7 +190,7 @@ host_ipc_marequest_info(
 kern_return_t
 mach_port_dnrequest_info(
 	ipc_space_t	space,
-	mach_port_t	name,
+	mach_port_name_t	name,
 	unsigned int	*totalp,
 	unsigned int	*usedp)
 {
@@ -249,7 +249,7 @@ mach_port_dnrequest_info(
 kern_return_t
 mach_port_kernel_object(
 	ipc_space_t	space,
-	mach_port_t	name,
+	mach_port_name_t	name,
 	unsigned int	*typep,
 	vm_offset_t	*addrp)
 {

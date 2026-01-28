@@ -42,6 +42,7 @@
 #include <kern/processor.h>
 #include <kern/ipc_host.h>
 #include <kern/mach_clock.h>
+#include <kern/mach_host.server.h>
 #include <mach/vm_param.h>
 
 host_data_t	realhost;
@@ -177,18 +178,18 @@ kern_return_t	host_info(
 	    {
 		host_load_info_t load_info;
 		extern long avenrun[3], mach_factor[3];
+		unsigned i;
 
 		if (*count < HOST_LOAD_INFO_COUNT)
 			return KERN_FAILURE;
 
 		load_info = (host_load_info_t) info;
 
-		memcpy(load_info->avenrun,
-		       avenrun,
-		       sizeof avenrun);
-		memcpy(load_info->mach_factor,
-		       mach_factor,
-		       sizeof mach_factor);
+		for (i = 0; i < 3; i++)
+		{
+			load_info->avenrun[i] = avenrun[i];
+			load_info->mach_factor[i] = mach_factor[i];
+		}
 
 		*count = HOST_LOAD_INFO_COUNT;
 		return KERN_SUCCESS;
@@ -204,7 +205,7 @@ kern_return_t	host_info(
  *	wanted to know about what version of the kernel this is).
  */
 
-kern_return_t host_kernel_version(
+kern_return_t host_get_kernel_version(
 	const host_t		host,
 	kernel_version_t	out_version)
 {
@@ -217,6 +218,16 @@ kern_return_t host_kernel_version(
 
 	return KERN_SUCCESS;
 }
+
+#if defined(__i386__) || (defined(__x86_64__) && defined(USER32))
+/* Same as above, but only exists on i386.  */
+kern_return_t host_kernel_version(
+	const host_t		host,
+	kernel_version_t	out_version)
+{
+	return host_get_kernel_version(host, out_version);
+}
+#endif
 
 /*
  *	host_processor_sets:

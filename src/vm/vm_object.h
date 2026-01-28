@@ -232,11 +232,11 @@ extern void		vm_object_pager_create(
 extern void		vm_object_destroy(
 	struct ipc_port	*pager);
 
-extern void vm_object_page_map(
+extern kern_return_t vm_object_page_map(
 	vm_object_t,
-        vm_offset_t,
-        vm_size_t,
-	vm_offset_t	(*)(void *, vm_offset_t),
+	vm_offset_t,
+	vm_size_t,
+	phys_addr_t	(*)(void *, vm_offset_t),
 	void *);
 
 extern vm_object_t	vm_object_request_object(struct ipc_port *);
@@ -247,7 +247,9 @@ extern boolean_t vm_object_coalesce(
    vm_offset_t prev_offset,
    vm_offset_t next_offset,
    vm_size_t   prev_size,
-   vm_size_t   next_size);
+   vm_size_t   next_size,
+   vm_object_t *new_object,	/* OUT */
+   vm_offset_t *new_offset);	/* OUT */
 
 extern void vm_object_pager_wakeup(ipc_port_t  pager);
 

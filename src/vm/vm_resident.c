@@ -52,6 +52,7 @@
 #include <vm/vm_page.h>
 #include <vm/vm_pageout.h>
 #include <vm/vm_kern.h>
+#include <vm/vm_resident.h>
 
 #if	MACH_VM_DEBUG
 #include <mach/kern_return.h>
@@ -97,7 +98,7 @@ unsigned long	vm_page_bucket_count = 0;	/* How big is array? */
 unsigned long	vm_page_hash_mask;		/* Mask for hash function */
 
 static struct list	vm_page_queue_fictitious;
-decl_simple_lock_data(,vm_page_queue_free_lock)
+def_simple_lock_data(,vm_page_queue_free_lock)
 int		vm_page_fictitious_count;
 int		vm_object_external_count;
 int		vm_object_external_pages;
@@ -128,7 +129,7 @@ phys_addr_t vm_page_fictitious_addr = (phys_addr_t) -1;
  *	defined here, but are shared by the pageout
  *	module.
  */
-decl_simple_lock_data(,vm_page_queue_lock)
+def_simple_lock_data(,vm_page_queue_lock)
 int	vm_page_active_count;
 int	vm_page_inactive_count;
 int	vm_page_wire_count;
@@ -232,7 +233,8 @@ void vm_page_bootstrap(
 vm_offset_t pmap_steal_memory(
 	vm_size_t size)
 {
-	vm_offset_t addr, vaddr, paddr;
+	vm_offset_t addr, vaddr;
+	phys_addr_t paddr;
 
 	size = round_page(size);
 
@@ -323,6 +325,9 @@ void vm_page_insert(
 {
 	vm_page_bucket_t *bucket;
 
+	assert(vm_page_locked_queues());
+	assert(vm_object_lock_taken(object));
+
 	VM_PAGE_CHECK(mem);
 
 	assert(!mem->active && !mem->inactive);
@@ -400,6 +405,9 @@ void vm_page_replace(
 	vm_offset_t	offset)
 {
 	vm_page_bucket_t *bucket;
+
+	assert(vm_page_locked_queues());
+	assert(vm_object_lock_taken(object));
 
 	VM_PAGE_CHECK(mem);
 
@@ -500,6 +508,10 @@ void vm_page_remove(
 	vm_page_t		this;
 
 	assert(mem->tabled);
+
+	assert(vm_page_locked_queues());
+	assert(vm_object_lock_taken(mem->object));
+
 	VM_PAGE_CHECK(mem);
 
 	/*
@@ -562,6 +574,8 @@ vm_page_t vm_page_lookup(
 	vm_page_t		mem;
 	vm_page_bucket_t 	*bucket;
 
+	assert(vm_object_lock_taken(object));
+
 	/*
 	 *	Search the hash table for this object/offset pair
 	 */
@@ -595,6 +609,8 @@ void vm_page_rename(
 	 *	Changes to mem->object require the page lock because
 	 *	the pageout daemon uses that lock to get the object.
 	 */
+
+	assert(vm_object_lock_taken(new_object));
 
 	vm_page_lock_queues();
     	vm_page_remove(mem);
@@ -735,20 +751,23 @@ boolean_t vm_page_convert(struct vm_page **mp)
 	assert(!fict_m->active);
 	assert(!fict_m->inactive);
 
-	real_m = vm_page_grab();
+	real_m = vm_page_grab(VM_PAGE_HIGHMEM);
 	if (real_m == VM_PAGE_NULL)
 		return FALSE;
 
 	object = fict_m->object;
+	assert(vm_object_lock_taken(object));
 	offset = fict_m->offset;
+	vm_page_lock_queues();
 	vm_page_remove(fict_m);
 
 	memcpy(&real_m->vm_page_header,
 	       &fict_m->vm_page_header,
-	       sizeof(*fict_m) - VM_PAGE_HEADER_SIZE);
+	       VM_PAGE_BODY_SIZE);
 	real_m->fictitious = FALSE;
 
 	vm_page_insert(real_m, object, offset);
+	vm_page_unlock_queues();
 
 	assert(real_m->phys_addr != vm_page_fictitious_addr);
 	assert(fict_m->fictitious);
@@ -764,11 +783,30 @@ boolean_t vm_page_convert(struct vm_page **mp)
  *
  *	Remove a page from the free list.
  *	Returns VM_PAGE_NULL if the free list is too small.
+ *
+ *	FLAGS specify which constraint should be enforced for the allocated
+ *	addresses.
  */
 
-vm_page_t vm_page_grab(void)
+vm_page_t vm_page_grab(unsigned flags)
 {
+	unsigned selector;
 	vm_page_t	mem;
+
+	if (flags & VM_PAGE_HIGHMEM)
+		selector = VM_PAGE_SEL_HIGHMEM;
+#if defined(VM_PAGE_DMA32_LIMIT) && VM_PAGE_DMA32_LIMIT > VM_PAGE_DIRECTMAP_LIMIT
+       else if (flags & VM_PAGE_DMA32)
+               selector = VM_PAGE_SEL_DMA32;
+#endif
+	else if (flags & VM_PAGE_DIRECTMAP)
+		selector = VM_PAGE_SEL_DIRECTMAP;
+#if defined(VM_PAGE_DMA32_LIMIT) && VM_PAGE_DMA32_LIMIT <= VM_PAGE_DIRECTMAP_LIMIT
+	else if (flags & VM_PAGE_DMA32)
+		selector = VM_PAGE_SEL_DMA32;
+#endif
+	else
+		selector = VM_PAGE_SEL_DMA;
 
 	simple_lock(&vm_page_queue_free_lock);
 
@@ -781,7 +819,7 @@ vm_page_t vm_page_grab(void)
 	 * explicit VM calls. The strategy is then to let memory
 	 * pressure balance the physical segments with pageable pages.
 	 */
-	mem = vm_page_alloc_pa(0, VM_PAGE_SEL_DIRECTMAP, VM_PT_KERNEL);
+	mem = vm_page_alloc_pa(0, selector, VM_PT_KERNEL);
 
 	if (mem == NULL) {
 		simple_unlock(&vm_page_queue_free_lock);
@@ -796,7 +834,7 @@ vm_page_t vm_page_grab(void)
 
 phys_addr_t vm_page_grab_phys_addr(void)
 {
-	vm_page_t p = vm_page_grab();
+	vm_page_t p = vm_page_grab(VM_PAGE_DIRECTMAP);
 	if (p == VM_PAGE_NULL)
 		return -1;
 	else
@@ -924,7 +962,9 @@ vm_page_t vm_page_alloc(
 {
 	vm_page_t	mem;
 
-	mem = vm_page_grab();
+	assert(vm_object_lock_taken(object));
+
+	mem = vm_page_grab(VM_PAGE_HIGHMEM);
 	if (mem == VM_PAGE_NULL)
 		return VM_PAGE_NULL;
 
@@ -952,6 +992,10 @@ void vm_page_free(
 	if (mem->tabled) {
 		vm_page_remove(mem);
 	}
+
+	assert(vm_page_locked_queues());
+	if (mem->absent)
+		assert(vm_object_lock_taken(mem->object));
 
 	assert(!mem->active && !mem->inactive);
 
@@ -1060,12 +1104,11 @@ vm_page_info(
 /*
  *	Routine:	vm_page_print [exported]
  */
-void		vm_page_print(p)
-	const vm_page_t	p;
+void		vm_page_print(const vm_page_t	p)
 {
 	iprintf("Page 0x%X: object 0x%X,", (vm_offset_t) p, (vm_offset_t) p->object);
 	 printf(" offset 0x%X", p->offset);
-	 printf("wire_count %d,", p->wire_count);
+	 printf(" wire_count %d,", p->wire_count);
 	 printf(" %s",
 		(p->active ? "active" : (p->inactive ? "inactive" : "loose")));
 	 printf("%s",

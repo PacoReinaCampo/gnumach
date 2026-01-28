@@ -84,6 +84,12 @@
 
 #include <linux/dev/glue/glue.h>
 
+#ifdef PAE
+#define VM_PAGE_LINUX VM_PAGE_DMA32
+#else
+#define VM_PAGE_LINUX VM_PAGE_HIGHMEM
+#endif
+
 /* This task queue is not used in Mach: just for fixing undefined symbols. */
 DECLARE_TASK_QUEUE (tq_disk);
 
@@ -200,7 +206,10 @@ int
 blk_dev_init ()
 {
 #ifdef CONFIG_BLK_DEV_IDE
-  ide_init ();
+  extern char *kernel_cmdline;
+  if (strncmp(kernel_cmdline, "noide", 5) &&
+      !strstr(kernel_cmdline, " noide"))
+    ide_init ();
 #endif
 #ifdef CONFIG_BLK_DEV_FD
   floppy_init ();
@@ -303,7 +312,7 @@ alloc_buffer (int size)
 
   if (! linux_auto_config)
     {
-      while ((m = vm_page_grab ()) == 0)
+      while ((m = vm_page_grab (VM_PAGE_DMA32)) == 0)
 	VM_PAGE_WAIT (0);
       d = current_thread ()->pcb->data;
       assert (d);
@@ -442,6 +451,24 @@ enqueue_request (struct request *req)
   sti ();
 }
 
+int
+check_rw_block (int nr, struct buffer_head **bh)
+{
+  int i, bshift, bsize;
+  get_block_size (bh[0]->b_dev, &bsize, &bshift);
+  loff_t sectorl = bh[0]->b_blocknr << (bshift - 9);
+
+  for (i = 0; i < nr; i++)
+    {
+      sectorl += bh[i]->b_size >> 9;
+      unsigned long sector = sectorl;
+      if (sector != sectorl)
+	return -EOVERFLOW;
+    }
+
+  return 0;
+}
+
 /* Perform the I/O operation RW on the buffer list BH
    containing NR buffers.  */
 void
@@ -506,11 +533,15 @@ rdwr_partial (int rw, kdev_t dev, loff_t *off,
   long sect, nsect;
   struct buffer_head bhead, *bh = &bhead;
   struct gendisk *gd;
+  loff_t blkl;
 
   memset (bh, 0, sizeof (struct buffer_head));
   bh->b_state = 1 << BH_Lock;
   bh->b_dev = dev;
-  bh->b_blocknr = *off >> bshift;
+  blkl = *off >> bshift;
+  bh->b_blocknr = blkl;
+  if (bh->b_blocknr != blkl)
+    return -EOVERFLOW;
   bh->b_size = BSIZE;
 
   /* Check if this device has non even number of blocks.  */
@@ -522,7 +553,9 @@ rdwr_partial (int rw, kdev_t dev, loff_t *off,
       }
   if (nsect > 0)
     {
-      sect = bh->b_blocknr << (bshift - 9);
+      loff_t sectl;
+      sectl = bh->b_blocknr << (bshift - 9);
+      sect = sectl;
       assert ((nsect - sect) > 0);
       if (nsect - sect < (BSIZE >> 9))
 	bh->b_size = (nsect - sect) << 9;
@@ -530,6 +563,9 @@ rdwr_partial (int rw, kdev_t dev, loff_t *off,
   bh->b_data = alloc_buffer (bh->b_size);
   if (! bh->b_data)
     return -ENOMEM;
+  err = check_rw_block (1, &bh);
+  if (err)
+    goto out;
   ll_rw_block (READ, 1, &bh, 0);
   wait_on_buffer (bh);
   if (buffer_uptodate (bh))
@@ -544,6 +580,9 @@ rdwr_partial (int rw, kdev_t dev, loff_t *off,
 	{
 	  memcpy (bh->b_data + o, *buf, c);
 	  bh->b_state = (1 << BH_Dirty) | (1 << BH_Lock);
+	  err = check_rw_block (1, &bh);
+	  if (err)
+	    goto out;
 	  ll_rw_block (WRITE, 1, &bh, 0);
 	  wait_on_buffer (bh);
 	  if (! buffer_uptodate (bh))
@@ -576,14 +615,18 @@ static int
 rdwr_full (int rw, kdev_t dev, loff_t *off, char **buf, int *resid, int bshift)
 {
   int cc, err = 0, i, j, nb, nbuf;
-  long blk;
+  loff_t blkl;
+  long blk, newblk;
   struct buffer_head bhead[MAX_BUF], *bh, *bhp[MAX_BUF];
   phys_addr_t pa;
 
   assert ((*off & BMASK) == 0);
 
   nbuf = *resid >> bshift;
-  blk = *off >> bshift;
+  blkl = *off >> bshift;
+  blk = blkl;
+  if (blk != blkl)
+    return -EOVERFLOW;
   for (i = nb = 0, bh = bhead; nb < nbuf; bh++)
     {
       memset (bh, 0, sizeof (*bh));
@@ -621,10 +664,18 @@ rdwr_full (int rw, kdev_t dev, loff_t *off, char **buf, int *resid, int bshift)
       bh->b_size = cc;
       bhp[i] = bh;
       nb += cc >> bshift;
-      blk += cc >> bshift;
+      newblk = blk + (cc >> bshift);
+      if (newblk < blk)
+	{
+	  err = -EOVERFLOW;
+	  break;
+	}
+      blk = newblk;
       if (++i == MAX_BUF)
 	break;
     }
+  if (! err)
+    err = check_rw_block (i, bhp);
   if (! err)
     {
       assert (i > 0);
@@ -993,13 +1044,13 @@ check:
 
 #define DECL_DATA	struct temp_data td
 #define INIT_DATA()			\
-{					\
+MACRO_BEGIN				\
   list_init (&td.pages);		\
   td.inode.i_rdev = bd->dev;		\
   td.file.f_mode = bd->mode;		\
   td.file.f_flags = bd->flags;		\
   current_thread ()->pcb->data = &td;	\
-}
+MACRO_END
 
 static io_return_t
 device_open (ipc_port_t reply_port, mach_msg_type_name_t reply_port_type,
@@ -1357,6 +1408,8 @@ device_write (void *d, ipc_port_t reply_port,
 		    copy->cpy_page_list[i]->phys_addr,
 		    VM_PROT_READ|VM_PROT_WRITE, TRUE);
 
+#warning FIXME: if physical adress is beyond VM_PAGE_DMA32 with PAE, we need a bounce buffer
+
       /* Do the write.  */
       amt = (*bd->ds->fops->write) (&td.inode, &td.file,
 				    (char *) addr + (uaddr & PAGE_MASK), len);
@@ -1483,7 +1536,7 @@ device_read (void *d, ipc_port_t reply_port,
       /* Allocate and map pages.  */
       while (alloc_offset < trunc_page (offset) + len)
 	{
-	  while ((m = vm_page_grab ()) == 0)
+	  while ((m = vm_page_grab (VM_PAGE_LINUX)) == 0)
 	    VM_PAGE_WAIT (0);
 	  assert (! m->active && ! m->inactive);
 	  m->busy = TRUE;

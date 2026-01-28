@@ -34,6 +34,7 @@
 
 #include <kern/mach_clock.h>
 #include <i386/thread.h>
+#include <i386/hardclock.h>
 
 #if	defined(AT386) || defined(ATX86_64)
 #include <i386/ipl.h>
@@ -46,13 +47,11 @@
 extern char	return_to_iret[];
 
 void
-hardclock(iunit,        old_ipl, irq, ret_addr, regs)
-       int     	iunit;          /* 'unit' number */
-	int		old_ipl;	/* old interrupt level */
-	int		irq;		/* irq number */
-	const char *	ret_addr;	/* return address in interrupt handler */
-	struct i386_interrupt_state *regs;
-				/* saved registers */
+hardclock(int iunit, /* 'unit' number */
+          int old_ipl, /* old interrupt level */
+          const char *ret_addr, /* return address in interrupt handler */
+          struct i386_interrupt_state *regs /* saved registers */
+          )
 {
 	if (ret_addr == return_to_iret)
 	    /*

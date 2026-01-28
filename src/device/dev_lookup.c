@@ -60,8 +60,7 @@ queue_head_t	dev_number_hash_table[NDEVHASH];
  * Lock for device-number to device lookup.
  * Must be held before device-ref_count lock.
  */
-decl_simple_lock_data(,
-		dev_number_lock)
+def_simple_lock_data(static, dev_number_lock)
 
 struct kmem_cache	dev_hdr_cache;
 
@@ -69,9 +68,8 @@ struct kmem_cache	dev_hdr_cache;
  * Enter device in the number lookup table.
  * The number table lock must be held.
  */
-void
-dev_number_enter(device)
-	const mach_device_t	device;
+static void
+dev_number_enter(const mach_device_t device)
 {
 	queue_t	q;
 
@@ -83,9 +81,8 @@ dev_number_enter(device)
  * Remove device from the device-number lookup table.
  * The device-number table lock must be held.
  */
-void
-dev_number_remove(device)
-	const mach_device_t	device;
+static void
+dev_number_remove(const mach_device_t device)
 {
 	queue_t	q;
 
@@ -97,10 +94,8 @@ dev_number_remove(device)
  * Lookup a device by device operations and minor number.
  * The number table lock must be held.
  */
-mach_device_t
-dev_number_lookup(ops, devnum)
-	const dev_ops_t	ops;
-	int		devnum;
+static mach_device_t
+dev_number_lookup(const dev_ops_t ops, int devnum)
 {
 	queue_t	q;
 	mach_device_t	device;
@@ -120,7 +115,7 @@ dev_number_lookup(ops, devnum)
  * table.
  */
 mach_device_t
-device_lookup(char *name)
+device_lookup(const char *name)
 {
 	dev_ops_t	dev_ops;
 	int		dev_minor;
@@ -299,8 +294,7 @@ dev_port_lookup(ipc_port_t port)
  * Consumes a device reference; produces a naked send right.
  */
 ipc_port_t
-convert_device_to_port(device)
-	const device_t	device;
+convert_device_to_port(const device_t	device)
 {
 	if (device == DEVICE_NULL)
 	    return IP_NULL;
@@ -316,7 +310,7 @@ convert_device_to_port(device)
  */
 boolean_t
 dev_map(
-	boolean_t	(*routine)(),
+	dev_map_fn	routine,
 	mach_port_t	port)
 {
 	int		i;

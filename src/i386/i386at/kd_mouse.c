@@ -72,7 +72,7 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <device/io_req.h>
 #include <device/subrs.h>
 #include <i386/ipl.h>
-#include <i386/pic.h>
+#include <i386/irq.h>
 #include <i386/pio.h>
 #include <chips/busses.h>
 #include <i386at/com.h>
@@ -82,7 +82,7 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 #include "kd_mouse.h"
 
-static void (*oldvect)();		/* old interrupt vector */
+static interrupt_handler_fn oldvect;	/* old interrupt vector */
 static int oldunit;
 extern	struct	bus_device *cominfo[];
 
@@ -106,11 +106,12 @@ boolean_t	mouse_char_cmd = FALSE;		/* mouse response is to cmd */
 boolean_t	mouse_char_wanted = FALSE;	/* want mouse response */
 int		mouse_char_index;		/* mouse response */
 
+#define IBM_MOUSE_IRQ	12
 
 /*
  * init_mouse_hw - initialize the serial port.
  */
-void
+static void
 init_mouse_hw(dev_t unit, int mode)
 {
 	unsigned short base_addr  = cominfo[unit]->address;
@@ -146,10 +147,7 @@ int track_man[10];
 
 /*ARGSUSED*/
 int
-mouseopen(dev, flags, ior)
-	dev_t dev;
-	int flags;
-	io_req_t ior;
+mouseopen(dev_t dev, int flags, io_req_t ior)
 {
 	if (mouse_in_use)
 		return (D_ALREADY_OPEN);
@@ -186,7 +184,7 @@ mouseopen(dev, flags, ior)
 		break;
 	case IBM_MOUSE:
 		mousebufsize = 3;
-		kd_mouse_open(dev, 12);
+		kd_mouse_open(dev, IBM_MOUSE_IRQ);
 		ibm_ps2_mouse_open(dev);
 		break;
 	case NO_MOUSE:
@@ -225,6 +223,7 @@ kd_mouse_open(
 
 	oldvect = ivect[mouse_pic];
 	ivect[mouse_pic] = kdintr;
+	unmask_irq(mouse_pic);
 	splx(s);
 }
 
@@ -246,7 +245,7 @@ mouseclose(
 		break;
 	case IBM_MOUSE:
 		ibm_ps2_mouse_close(dev);
-		kd_mouse_close(dev, 12);
+		kd_mouse_close(dev, IBM_MOUSE_IRQ);
 		{int i = 20000; for (;i--;); }
 		kd_mouse_drain();
 		break;
@@ -285,6 +284,7 @@ kd_mouse_close(
 {
 	spl_t s = splhi();
 
+	mask_irq(mouse_pic);
 	ivect[mouse_pic] = oldvect;
 	splx(s);
 }
@@ -430,7 +430,6 @@ int lastgitech = 0x40;		/* figure whether the first 3 bytes imply */
 int fourthgitech = 0;		/* look for the 4th byte; we must process it */
 int middlegitech = 0;		/* what should the middle button be */
 
-#define MOUSEBUFSIZE	5		/* num bytes def'd by protocol */
 static u_char mousebuf[MOUSEBUFSIZE];	/* 5-byte packet from mouse */
 
 void
@@ -598,7 +597,7 @@ mouse_packet_microsoft_mouse(u_char mousebuf[MOUSEBUFSIZE])
 /*
  *	Write character to mouse.  Called at spltty.
  */
-void kd_mouse_write(
+static void kd_mouse_write(
 	unsigned char	ch)
 {
 	while (inb(K_STATUS) & K_IBUF_FUL)
@@ -614,7 +613,7 @@ void kd_mouse_write(
  *	Read next character from mouse, waiting for interrupt
  *	to deliver it.  Called at spltty.
  */
-int kd_mouse_read(void)
+static int kd_mouse_read(void)
 {
 	int	ch;
 
@@ -637,7 +636,7 @@ int kd_mouse_read(void)
 /*
  *	Prepare buffer for receiving next packet from mouse.
  */
-void kd_mouse_read_reset(void)
+static void kd_mouse_read_reset(void)
 {
 	mousebufindex = 0;
 	mouse_char_index = 0;
@@ -755,7 +754,9 @@ mouse_moved(struct mouse_motion where)
 	kd_event ev;
 
 	ev.type = MOUSE_MOTION;
-	ev.time = time;
+	/* Not used but we set it to avoid garbage */
+	ev.unused_time.seconds = 0;
+	ev.unused_time.microseconds = 0;
 	ev.value.mmotion = where;
 	mouse_enqueue(&ev);
 }
@@ -771,8 +772,10 @@ mouse_button(
 	kd_event ev;
 
 	ev.type = which;
-	ev.time = time;
 	ev.value.up = (direction == MOUSE_UP) ? TRUE : FALSE;
+	/* Not used but we set it to avoid garbage */
+	ev.unused_time.seconds = 0;
+	ev.unused_time.microseconds = 0;
 	mouse_enqueue(&ev);
 }
 

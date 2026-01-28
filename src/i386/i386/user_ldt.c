@@ -39,6 +39,7 @@
 #include <i386/seg.h>
 #include <i386/thread.h>
 #include <i386/user_ldt.h>
+#include <i386/i386/mach_i386.server.h>
 #include <stddef.h>
 #include "ldt.h"
 #include "vm_param.h"
@@ -51,10 +52,11 @@ kern_return_t
 i386_set_ldt(
 	thread_t		thread,
 	int			first_selector,
-	struct real_descriptor  *desc_list,
+	const struct descriptor  *descriptor_list,
 	unsigned int		count,
 	boolean_t		desc_list_inline)
 {
+	struct real_descriptor* desc_list = (struct real_descriptor *)descriptor_list;
 	user_ldt_t	new_ldt, old_ldt, temp;
 	struct real_descriptor *dp;
 	unsigned	i;
@@ -253,13 +255,14 @@ i386_set_ldt(
 }
 
 kern_return_t
-i386_get_ldt(thread, first_selector, selector_count, desc_list, count)
-	const thread_t	thread;
-	int		first_selector;
-	int		selector_count;		/* number wanted */
-	struct real_descriptor **desc_list;	/* in/out */
-	unsigned int	*count;			/* in/out */
+i386_get_ldt(const thread_t thread,
+	     int first_selector,
+	     int selector_count,                 /* number wanted */
+	     struct descriptor **descriptor_list, /* in/out */
+	     unsigned int *count                /* in/out */
+	)
 {
+	struct real_descriptor** desc_list = (struct real_descriptor **)descriptor_list;
 	struct user_ldt *user_ldt;
 	pcb_t		pcb;
 	int		first_desc = sel_idx(first_selector);
@@ -385,8 +388,9 @@ user_ldt_free(user_ldt_t user_ldt)
 
 
 kern_return_t
-i386_set_gdt (thread_t thread, int *selector, struct real_descriptor desc)
+i386_set_gdt (thread_t thread, int *selector, struct descriptor descriptor)
 {
+	const struct real_descriptor *desc = (struct real_descriptor *)&descriptor;
   int idx;
 
   if (thread == THREAD_NULL)
@@ -410,14 +414,14 @@ i386_set_gdt (thread_t thread, int *selector, struct real_descriptor desc)
   else
     idx = sel_idx (*selector) - sel_idx(USER_GDT);
 
-  if ((desc.access & ACC_P) == 0)
+  if ((desc->access & ACC_P) == 0)
     memset (&thread->pcb->ims.user_gdt[idx], 0,
             sizeof thread->pcb->ims.user_gdt[idx]);
-  else if ((desc.access & (ACC_TYPE_USER|ACC_PL)) != (ACC_TYPE_USER|ACC_PL_U) || (desc.granularity & SZ_64))
+  else if ((desc->access & (ACC_TYPE_USER|ACC_PL)) != (ACC_TYPE_USER|ACC_PL_U) || (desc->granularity & SZ_64))
 
     return KERN_INVALID_ARGUMENT;
   else
-    thread->pcb->ims.user_gdt[idx] = desc;
+		memcpy (&thread->pcb->ims.user_gdt[idx], desc, sizeof (struct descriptor));
 
   /*
    * If we are modifying the GDT for the current thread,
@@ -430,8 +434,9 @@ i386_set_gdt (thread_t thread, int *selector, struct real_descriptor desc)
 }
 
 kern_return_t
-i386_get_gdt (const thread_t thread, int selector, struct real_descriptor *desc)
+i386_get_gdt (const thread_t thread, int selector, struct descriptor *descriptor)
 {
+	struct real_descriptor *desc = (struct real_descriptor *)descriptor;
   if (thread == THREAD_NULL)
     return KERN_INVALID_ARGUMENT;
 

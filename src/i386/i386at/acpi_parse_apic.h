@@ -22,7 +22,7 @@
 #ifndef __ACPI_H__
 #define __ACPI_H__
 
-#include <include/stdint.h>
+#include <stdint.h>
 
 enum ACPI_RETURN {
     ACPI_BAD_CHECKSUM = -1,
@@ -44,10 +44,17 @@ struct acpi_rsdp {
     uint8_t  	signature[8];
     uint8_t  	checksum;
     uint8_t  	oem_id[6];
-    uint8_t  	revision[1];
+    uint8_t  	revision;
     uint32_t 	rsdt_addr;
 } __attribute__((__packed__));
 
+struct acpi_rsdp2 {
+    struct acpi_rsdp v1;
+    uint32_t	length;
+    uint64_t	xsdt_addr;
+    uint8_t	checksum;
+    uint8_t 	reserved[3];
+} __attribute__((__packed__));
 
 /*
  * RSDT Entry Header
@@ -75,6 +82,21 @@ struct acpi_dhdr {
 struct acpi_rsdt {
     struct acpi_dhdr 	header;
     uint32_t 			entry[0];
+} __attribute__((__packed__));
+
+#define ACPI_XSDT_SIG "XSDT"
+
+struct acpi_xsdt {
+    struct acpi_dhdr 	header;
+    uint64_t 			entry[0];
+} __attribute__((__packed__));
+
+struct acpi_address {
+    uint8_t	is_io;
+    uint8_t	reg_width;
+    uint8_t	reg_offset;
+    uint8_t	reserved;
+    uint64_t	addr64;
 } __attribute__((__packed__));
 
 /* APIC table signature. */
@@ -127,6 +149,8 @@ struct acpi_apic_lapic {
     uint32_t    flags;
 } __attribute__((__packed__));
 
+#define ACPI_LAPIC_FLAG_ENABLED	(1 << 0)
+#define ACPI_LAPIC_FLAG_CAPABLE	(1 << 1)
 
 /*
  * I/O APIC Structure
@@ -139,7 +163,7 @@ struct acpi_apic_ioapic {
     uint8_t     apic_id;
     uint8_t     reserved;
     uint32_t    addr;
-    uint32_t    base;
+    uint32_t    gsi_base;
 } __attribute__((__packed__));
 
 /*
@@ -156,8 +180,24 @@ struct acpi_apic_irq_override {
     uint16_t    flags;
 } __attribute__((__packed__));
 
-int acpi_apic_init(void);
-void acpi_print_info(struct acpi_rsdp *rsdp, struct acpi_rsdt *rsdt, int acpi_rsdt_n);
 
+#define ACPI_HPET_SIG "HPET"
+
+/*
+ * HPET High Precision Event Timer structure
+ */
+struct acpi_hpet {
+    struct acpi_dhdr header;
+    uint32_t	id;
+    struct acpi_address	address;
+    uint8_t	sequence;
+    uint16_t	minimum_tick;
+    uint8_t	flags;
+} __attribute__((__packed__));
+
+int acpi_apic_init(void);
+void acpi_print_info(phys_addr_t rsdp, void *rsdt, int acpi_rsdt_n);
+
+extern unsigned lapic_addr;
 
 #endif /* __ACPI_H__ */

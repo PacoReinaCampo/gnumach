@@ -48,6 +48,7 @@
 #include <kern/ipc_sched.h>
 #include <kern/exception.h>
 #include <vm/vm_map.h>
+#include <ipc/copy_user.h>
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_marequest.h>
 #include <ipc/ipc_mqueue.h>
@@ -89,11 +90,11 @@
 
 mach_msg_return_t
 mach_msg_send(
-	mach_msg_header_t 	*msg,
+	mach_msg_user_header_t 	*msg,
 	mach_msg_option_t 	option,
 	mach_msg_size_t 	send_size,
 	mach_msg_timeout_t 	time_out,
-	mach_port_t 		notify)
+	mach_port_name_t 	notify)
 {
 	ipc_space_t space = current_space();
 	vm_map_t map = current_map();
@@ -171,12 +172,12 @@ mach_msg_send(
 
 mach_msg_return_t
 mach_msg_receive(
-	mach_msg_header_t 	*msg,
+	mach_msg_user_header_t 	*msg,
 	mach_msg_option_t 	option,
 	mach_msg_size_t 	rcv_size,
-	mach_port_t 		rcv_name,
+	mach_port_name_t 	rcv_name,
 	mach_msg_timeout_t 	time_out,
-	mach_port_t 		notify)
+	mach_port_name_t 	notify)
 {
 	ipc_thread_t self = current_thread();
 	ipc_space_t space = current_space();
@@ -241,7 +242,7 @@ mach_msg_receive(
 			return mr;
 
 		kmsg->ikm_header.msgh_seqno = seqno;
-		if (kmsg->ikm_header.msgh_size > rcv_size) {
+		if (msg_usize(&kmsg->ikm_header) > rcv_size) {
 			ipc_kmsg_copyout_dest(kmsg, space);
 			(void) ipc_kmsg_put(msg, kmsg, sizeof *msg);
 			return MACH_RCV_TOO_LARGE;
@@ -286,11 +287,11 @@ mach_msg_receive_continue(void)
 	ipc_thread_t self = current_thread();
 	ipc_space_t space = current_space();
 	vm_map_t map = current_map();
-	mach_msg_header_t *msg = self->ith_msg;
+	mach_msg_user_header_t *msg = self->ith_msg;
 	mach_msg_option_t option = self->ith_option;
 	mach_msg_size_t rcv_size = self->ith_rcv_size;
 	mach_msg_timeout_t time_out = self->ith_timeout;
-	mach_port_t notify = self->ith_notify;
+	mach_port_name_t notify = self->ith_notify;
 	ipc_object_t object = self->ith_object;
 	ipc_mqueue_t mqueue = self->ith_mqueue;
 	ipc_kmsg_t kmsg;
@@ -321,7 +322,7 @@ mach_msg_receive_continue(void)
 		}
 
 		kmsg->ikm_header.msgh_seqno = seqno;
-		assert(kmsg->ikm_header.msgh_size <= rcv_size);
+		assert(msg_usize(&kmsg->ikm_header) <= rcv_size);
 	} else {
 		mr = ipc_mqueue_receive(mqueue, option & MACH_RCV_TIMEOUT,
 					MACH_MSG_SIZE_MAX, time_out,
@@ -335,7 +336,7 @@ mach_msg_receive_continue(void)
 		}
 
 		kmsg->ikm_header.msgh_seqno = seqno;
-		if (kmsg->ikm_header.msgh_size > rcv_size) {
+		if (msg_usize(&kmsg->ikm_header) > rcv_size) {
 			ipc_kmsg_copyout_dest(kmsg, space);
 			(void) ipc_kmsg_put(msg, kmsg, sizeof *msg);
 			thread_syscall_return(MACH_RCV_TOO_LARGE);
@@ -380,13 +381,13 @@ mach_msg_receive_continue(void)
 
 mach_msg_return_t
 mach_msg_trap(
-	mach_msg_header_t 	*msg,
+	mach_msg_user_header_t 	*msg,
 	mach_msg_option_t 	option,
 	mach_msg_size_t 	send_size,
 	mach_msg_size_t 	rcv_size,
-	mach_port_t 		rcv_name,
+	mach_port_name_t 	rcv_name,
 	mach_msg_timeout_t 	time_out,
-	mach_port_t 		notify)
+	mach_port_name_t 	notify)
 {
 	mach_msg_return_t mr;
 
@@ -449,22 +450,20 @@ mach_msg_trap(
 		 *	We must clear ikm_cache before copyinmsg.
 		 */
 
-		if ((send_size > IKM_SAVED_MSG_SIZE) ||
-		    (send_size < sizeof(mach_msg_header_t)) ||
-		    (send_size & 3) ||
-		    ((kmsg = ikm_cache()) == IKM_NULL))
+		if (((send_size * IKM_EXPAND_FACTOR) > IKM_SAVED_MSG_SIZE) ||
+		    (send_size < sizeof(mach_msg_user_header_t)) ||
+		    (send_size & 3))
 			goto slow_get;
 
-		ikm_cache() = IKM_NULL;
-		ikm_check_initialized(kmsg, IKM_SAVED_KMSG_SIZE);
+		kmsg = ikm_cache_alloc_try();
+		if (kmsg == IKM_NULL)
+			goto slow_get;
 
 		if (copyinmsg(msg, &kmsg->ikm_header,
-			      send_size)) {
+			      send_size, kmsg->ikm_size)) {
 			ikm_free(kmsg);
 			goto slow_get;
 		}
-
-		kmsg->ikm_header.msgh_size = send_size;
 
 	    fast_copyin:
 		/*
@@ -484,7 +483,7 @@ mach_msg_trap(
 					MACH_MSG_TYPE_MAKE_SEND_ONCE): {
 			ipc_port_t reply_port;
 		    {
-			mach_port_t reply_name =
+			mach_port_name_t reply_name =
 				kmsg->ikm_header.msgh_local_port;
 
 			if (reply_name != rcv_name)
@@ -496,20 +495,26 @@ mach_msg_trap(
 			ipc_entry_t entry;
 			entry = ipc_entry_lookup (space, reply_name);
 			if (entry == IE_NULL)
+			{
+				ipc_entry_lookup_failed (msg, reply_name);
 				goto abort_request_copyin;
+			}
 			reply_port = (ipc_port_t) entry->ie_object;
 			assert(reply_port != IP_NULL);
 		    }
 
 		    {
-			mach_port_t dest_name =
+			mach_port_name_t dest_name =
 				kmsg->ikm_header.msgh_remote_port;
 
 			ipc_entry_t entry;
 			ipc_entry_bits_t bits;
 			entry = ipc_entry_lookup (space, dest_name);
 			if (entry == IE_NULL)
+			{
+				ipc_entry_lookup_failed (msg, dest_name);
 				goto abort_request_copyin;
+			}
 			bits = entry->ie_bits;
 
 			/* check type bits */
@@ -604,7 +609,7 @@ mach_msg_trap(
 			/* sending a reply message */
 
 		    {
-			mach_port_t reply_name =
+			mach_port_name_t reply_name =
 				kmsg->ikm_header.msgh_local_port;
 
 			if (reply_name != MACH_PORT_NULL)
@@ -616,12 +621,15 @@ mach_msg_trap(
 
 		    {
 			ipc_entry_t entry;
-			mach_port_t dest_name =
+			mach_port_name_t dest_name =
 				kmsg->ikm_header.msgh_remote_port;
 
 			entry = ipc_entry_lookup (space, dest_name);
 			if (entry == IE_NULL)
+			{
+				ipc_entry_lookup_failed (msg, dest_name);
 				goto abort_reply_dest_copyin;
+			}
 
 			/* check type bits */
 			if (IE_BITS_TYPE (entry->ie_bits) !=
@@ -669,7 +677,10 @@ mach_msg_trap(
 			ipc_entry_bits_t bits;
 			entry = ipc_entry_lookup (space, rcv_name);
 			if (entry == IE_NULL)
+			{
+				ipc_entry_lookup_failed (msg, rcv_name);
 				goto abort_reply_rcv_copyin;
+			}
 			bits = entry->ie_bits;
 
 			/* check type bits; looking for receive or set */
@@ -791,7 +802,7 @@ mach_msg_trap(
 		self->ith_object = rcv_object;
 		self->ith_mqueue = rcv_mqueue;
 
-		if ((receiver->swap_func == (void (*)()) mach_msg_continue) &&
+		if ((receiver->swap_func == mach_msg_continue) &&
 		    thread_handoff(self, mach_msg_continue, receiver)) {
 			assert(current_thread() == receiver);
 
@@ -800,7 +811,7 @@ mach_msg_trap(
 			 *	because the receiver is using no options.
 			 */
 		} else if ((receiver->swap_func ==
-				(void (*)()) exception_raise_continue) &&
+				exception_raise_continue) &&
 			   thread_handoff(self, mach_msg_continue, receiver)) {
 			counter(c_mach_msg_trap_block_exc++);
 			assert(current_thread() == receiver);
@@ -832,7 +843,7 @@ mach_msg_trap(
 			assert(current_thread() == receiver);
 
 			if ((receiver->swap_func ==
-				(void (*)()) mach_msg_receive_continue) &&
+				mach_msg_receive_continue) &&
 			    ((receiver->ith_option & MACH_RCV_NOTIFY) == 0)) {
 				/*
 				 *	We can still use the optimized code.
@@ -942,7 +953,7 @@ mach_msg_trap(
 						== dest_port);
 
 		reply_size = kmsg->ikm_header.msgh_size;
-		if (rcv_size < reply_size)
+		if (rcv_size < msg_usize(&kmsg->ikm_header))
 			goto slow_copyout;
 
 		/* optimized ipc_kmsg_copyout/ipc_kmsg_copyout_header */
@@ -952,8 +963,8 @@ mach_msg_trap(
 					MACH_MSG_TYPE_PORT_SEND_ONCE): {
 			ipc_port_t reply_port =
 				(ipc_port_t) kmsg->ikm_header.msgh_local_port;
-			mach_port_t dest_name, reply_name;
-			unsigned long payload;
+			mach_port_name_t dest_name, reply_name;
+			rpc_uintptr_t payload;
 
 			/* receiving a request message */
 
@@ -1003,7 +1014,7 @@ mach_msg_trap(
 			entry->ie_bits = gen | (MACH_PORT_TYPE_SEND_ONCE | 1);
 		    }
 
-			assert(MACH_PORT_VALID(reply_name));
+			assert(MACH_PORT_NAME_VALID(reply_name));
 			entry->ie_object = (ipc_object_t) reply_port;
 			is_write_unlock(space);
 		    }
@@ -1057,8 +1068,8 @@ mach_msg_trap(
 		    }
 
 		    case MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND_ONCE, 0): {
-			mach_port_t dest_name;
-			unsigned long payload;
+			mach_port_name_t dest_name;
+			rpc_uintptr_t payload;
 
 			/* receiving a reply message */
 
@@ -1102,8 +1113,8 @@ mach_msg_trap(
 
 		    case MACH_MSGH_BITS_COMPLEX|
 			 MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND_ONCE, 0): {
-			mach_port_t dest_name;
-			unsigned long payload;
+			mach_port_name_t dest_name;
+			rpc_uintptr_t payload;
 
 			/* receiving a complex reply message */
 
@@ -1148,9 +1159,7 @@ mach_msg_trap(
 			kmsg->ikm_header.msgh_remote_port = MACH_PORT_NULL;
 
 			mr = ipc_kmsg_copyout_body(
-				(vm_offset_t) (&kmsg->ikm_header + 1),
-				(vm_offset_t) &kmsg->ikm_header
-					+ kmsg->ikm_header.msgh_size,
+                            kmsg,
 				space,
 				current_map());
 
@@ -1179,11 +1188,12 @@ mach_msg_trap(
 
 		if ((kmsg->ikm_size != IKM_SAVED_KMSG_SIZE) ||
 		    copyoutmsg(&kmsg->ikm_header, msg,
-			       reply_size) ||
-		    (ikm_cache() != IKM_NULL))
+			       reply_size))
 			goto slow_put;
 
-		ikm_cache() = kmsg;
+		if (!ikm_cache_free_try(kmsg))
+			goto slow_put;
+
 		thread_syscall_return(MACH_MSG_SUCCESS);
 		/*NOTREACHED*/
 		return MACH_MSG_SUCCESS; /* help for the compiler */
@@ -1454,7 +1464,7 @@ mach_msg_trap(
 		 */
 
 		reply_size = kmsg->ikm_header.msgh_size;
-		if (rcv_size < reply_size) {
+		if (rcv_size < msg_usize(&kmsg->ikm_header)) {
 			ipc_kmsg_copyout_dest(kmsg, space);
 			(void) ipc_kmsg_put(msg, kmsg, sizeof *msg);
 			thread_syscall_return(MACH_RCV_TOO_LARGE);
@@ -1548,7 +1558,7 @@ mach_msg_trap(
 			return mr;
 
 		kmsg->ikm_header.msgh_seqno = seqno;
-		if (rcv_size < kmsg->ikm_header.msgh_size) {
+		if (rcv_size < msg_usize(&kmsg->ikm_header)) {
 			ipc_kmsg_copyout_dest(kmsg, space);
 			(void) ipc_kmsg_put(msg, kmsg, sizeof *msg);
 			return MACH_RCV_TOO_LARGE;
@@ -1613,7 +1623,7 @@ mach_msg_continue(void)
 	task_t task = thread->task;
 	ipc_space_t space = task->itk_space;
 	vm_map_t map = task->map;
-	mach_msg_header_t *msg = thread->ith_msg;
+	mach_msg_user_header_t *msg = thread->ith_msg;
 	mach_msg_size_t rcv_size = thread->ith_rcv_size;
 	ipc_object_t object = thread->ith_object;
 	ipc_mqueue_t mqueue = thread->ith_mqueue;
@@ -1632,7 +1642,7 @@ mach_msg_continue(void)
 	}
 
 	kmsg->ikm_header.msgh_seqno = seqno;
-	if (kmsg->ikm_header.msgh_size > rcv_size) {
+	if (msg_usize(&kmsg->ikm_header) > rcv_size) {
 		ipc_kmsg_copyout_dest(kmsg, space);
 		(void) ipc_kmsg_put(msg, kmsg, sizeof *msg);
 		thread_syscall_return(MACH_RCV_TOO_LARGE);
@@ -1673,8 +1683,8 @@ mach_msg_interrupt(thread_t thread)
 {
 	ipc_mqueue_t mqueue;
 
-	assert((thread->swap_func == (void (*)()) mach_msg_continue) ||
-	       (thread->swap_func == (void (*)()) mach_msg_receive_continue));
+	assert((thread->swap_func == mach_msg_continue) ||
+	       (thread->swap_func == mach_msg_receive_continue));
 
 	mqueue = thread->ith_mqueue;
 	imq_lock(mqueue);

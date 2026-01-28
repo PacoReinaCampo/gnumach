@@ -41,7 +41,7 @@
 #include <device/cons.h>
 
 #if NCPUS>1
-simple_lock_data_t Assert_print_lock; /* uninited, we take our chances */
+simple_lock_irq_data_t Assert_print_lock; /* uninited, we take our chances */
 #endif
 
 static void
@@ -54,10 +54,10 @@ void
 Assert(const char *exp, const char *file, int line, const char *fun)
 {
 #if NCPUS > 1
-  	simple_lock(&Assert_print_lock);
+	spl_t s = simple_lock_irq(&Assert_print_lock);
 	printf("{cpu%d} %s:%d: %s: Assertion `%s' failed.",
 	       cpu_number(), file, line, fun, exp);
-	simple_unlock(&Assert_print_lock);
+	simple_unlock_irq(s, &Assert_print_lock);
 #else
 	printf("%s:%d: %s: Assertion `%s' failed.",
 	       file, line, fun, exp);
@@ -66,8 +66,7 @@ Assert(const char *exp, const char *file, int line, const char *fun)
 	Debugger("assertion failure");
 }
 
-void SoftDebugger(message)
-	const char *message;
+void SoftDebugger(const char *message)
 {
 	printf("Debugger invoked: %s\n", message);
 
@@ -98,8 +97,7 @@ void SoftDebugger(message)
 #endif
 }
 
-void Debugger(message)
-	const char *message;
+void Debugger(const char *message)
 {
 #if	!MACH_KDB
 	panic("Debugger invoked, but there isn't one!");
@@ -114,8 +112,7 @@ void Debugger(message)
    even before panic_init() gets called from the "normal" place in kern/startup.c.
    (panic_init() still needs to be called from there
    to make sure we get initialized before starting multiple processors.)  */
-boolean_t		panic_lock_initialized = FALSE;
-decl_simple_lock_data(,	panic_lock)
+def_simple_lock_irq_data(static,	panic_lock)
 
 const char     		*panicstr;
 int			paniccpu;
@@ -123,11 +120,6 @@ int			paniccpu;
 void
 panic_init(void)
 {
-	if (!panic_lock_initialized)
-	{
-		panic_lock_initialized = TRUE;
-		simple_lock_init(&panic_lock);
-	}
 }
 
 #if ! MACH_KBD
@@ -139,13 +131,14 @@ void
 Panic(const char *file, int line, const char *fun, const char *s, ...)
 {
 	va_list	listp;
+	spl_t spl;
 
 	panic_init();
 
-	simple_lock(&panic_lock);
+	spl = simple_lock_irq(&panic_lock);
 	if (panicstr) {
 	    if (cpu_number() != paniccpu) {
-		simple_unlock(&panic_lock);
+		simple_unlock_irq(spl, &panic_lock);
 		halt_cpu();
 		/* NOTREACHED */
 	    }
@@ -154,7 +147,7 @@ Panic(const char *file, int line, const char *fun, const char *s, ...)
 	    panicstr = s;
 	    paniccpu = cpu_number();
 	}
-	simple_unlock(&panic_lock);
+	simple_unlock_irq(spl, &panic_lock);
 	printf("panic ");
 #if	NCPUS > 1
 	printf("{cpu%d} ", paniccpu);
@@ -204,6 +197,8 @@ unsigned char __stack_chk_guard [ sizeof (vm_offset_t) ] =
 	[ sizeof (vm_offset_t) - 2 ] = '\n',
 	[ sizeof (vm_offset_t) - 1 ] = 0xff,
 };
+
+void __stack_chk_fail (void);
 
 void
 __stack_chk_fail (void)

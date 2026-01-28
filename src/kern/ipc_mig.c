@@ -27,6 +27,7 @@
 #include <mach/boolean.h>
 #include <mach/port.h>
 #include <mach/message.h>
+#include <mach/mig_support.h>
 #include <mach/thread_status.h>
 #include <machine/locore.h>
 #include <kern/ast.h>
@@ -40,6 +41,7 @@
 #include <kern/ipc_mig.h>
 #include <vm/vm_map.h>
 #include <vm/vm_user.h>
+#include <ipc/copy_user.h>
 #include <ipc/port.h>
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_entry.h>
@@ -49,10 +51,11 @@
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_pset.h>
 #include <ipc/ipc_thread.h>
-#include <ipc/mach_port.h>
+#include <ipc/mach_port.server.h>
 #include <device/dev_hdr.h>
 #include <device/device_types.h>
 #include <device/ds_routines.h>
+#include <machine/pcb.h>
 
 /*
  *	Routine:	mach_msg_send_from_kernel
@@ -91,10 +94,9 @@ mach_msg_send_from_kernel(
 }
 
 mach_msg_return_t
-mach_msg_rpc_from_kernel(msg, send_size, reply_size)
-	const mach_msg_header_t *msg;
-	mach_msg_size_t send_size;
-	mach_msg_size_t reply_size;
+mach_msg_rpc_from_kernel(const mach_msg_header_t *msg,
+	mach_msg_size_t send_size,
+	mach_msg_size_t reply_size)
 {
 	panic("mach_msg_rpc_from_kernel"); /*XXX*/
 }
@@ -145,9 +147,9 @@ mach_msg(
 	mach_msg_option_t 	option,
 	mach_msg_size_t 	send_size,
 	mach_msg_size_t 	rcv_size,
-	mach_port_t 		rcv_name,
+	mach_port_name_t 	rcv_name,
 	mach_msg_timeout_t 	time_out,
-	mach_port_t 		notify)
+	mach_port_name_t 	notify)
 {
 	ipc_space_t space = current_space();
 	vm_map_t map = current_map();
@@ -197,7 +199,7 @@ mach_msg(
 
 		kmsg->ikm_header.msgh_seqno = seqno;
 
-		if (rcv_size < kmsg->ikm_header.msgh_size) {
+		if (rcv_size < msg_usize(&kmsg->ikm_header)) {
 			ipc_kmsg_copyout_dest(kmsg, space);
 			ipc_kmsg_put_to_kernel(msg, kmsg, sizeof *msg);
 			return MACH_RCV_TOO_LARGE;
@@ -230,7 +232,7 @@ mach_msg(
  *		mach_msg() calls which are kernel calls.
  */
 
-mach_port_t
+mach_port_name_t
 mig_get_reply_port(void)
 {
 	ipc_thread_t self = current_thread();
@@ -271,10 +273,12 @@ mig_put_reply_port(
 /*
  * mig_strncpy.c - by Joshua Block
  *
- * mig_strncpy -- Bounded string copy.  Does what the library routine
+ * mig_strncpy -- Bounded string copy.  Does almost what the library routine
  * strncpy does: Copies the (null terminated) string in src into dest,
- * a buffer of length len.  Returns the length of the destination
- * string excluding the terminating null.
+ * a buffer of length len, but ensures dest is null terminated. If len is
+ * less than the length of the src string plus the null character, the
+ * string is truncated.
+ * Returns the length of the destination string excluding the terminating null.
  *
  * Parameters:
  *
@@ -285,25 +289,31 @@ mig_put_reply_port(
  *     len - Length of destination buffer.
  */
 vm_size_t
-mig_strncpy(dest, src, len)
-	char *dest;
-	const char *src;
-	int len;
+mig_strncpy(char *dest, const char *src, vm_size_t len)
 {
-	char *dest_ = dest;
-	int i;
+	vm_size_t i;
 
-	if (len <= 0)
+	if (len == 0)
 		return 0;
 
-	for (i = 0; i < len; i++) {
-		if (! (*dest = *src))
-			break;
-		dest++;
-		src++;
+	for (i = 0; i < len - 1; i++) {
+		if (! (*dest++ = *src++))
+			return i;
 	}
 
-	return dest - dest_;
+	/* Always null terminate the string. */
+	*dest = '\0';
+	return len - 1;
+}
+
+/* Called by MiG to deallocate memory, which in this case happens
+ * to be kernel memory. */
+void
+mig_deallocate(vm_address_t addr, vm_size_t size)
+{
+	(void) size;
+	/* We do the same thing as in ipc_kmsg_clean_body. */
+	vm_map_copy_discard((vm_map_copy_t) addr);
 }
 
 #define	fast_send_right_lookup(name, port, abort)			\
@@ -333,8 +343,8 @@ MACRO_BEGIN								\
 	is_read_unlock(space);						\
 MACRO_END
 
-device_t
-port_name_to_device(mach_port_t name)
+static device_t
+port_name_to_device(mach_port_name_t name)
 {
 	ipc_port_t port;
 	device_t device;
@@ -376,8 +386,8 @@ port_name_to_device(mach_port_t name)
     }
 }
 
-thread_t
-port_name_to_thread(mach_port_t name)
+static thread_t
+port_name_to_thread(mach_port_name_t name)
 {
 	ipc_port_t port;
 
@@ -421,8 +431,8 @@ port_name_to_thread(mach_port_t name)
     }
 }
 
-task_t
-port_name_to_task(mach_port_t name)
+static task_t
+port_name_to_task(mach_port_name_t name)
 {
 	ipc_port_t port;
 
@@ -468,9 +478,9 @@ port_name_to_task(mach_port_t name)
     }
 }
 
-vm_map_t
+static vm_map_t
 port_name_to_map(
-	mach_port_t	name)
+	mach_port_name_t	name)
 {
 	ipc_port_t port;
 
@@ -516,8 +526,8 @@ port_name_to_map(
     }
 }
 
-ipc_space_t
-port_name_to_space(mach_port_t name)
+static ipc_space_t
+port_name_to_space(mach_port_name_t name)
 {
 	ipc_port_t port;
 
@@ -564,47 +574,6 @@ port_name_to_space(mach_port_t name)
 }
 
 /*
- * Hack to translate a thread port to a thread pointer for calling
- * thread_get_state and thread_set_state.  This is only necessary
- * because the IPC message for these two operations overflows the
- * kernel stack.
- *
- * AARGH!
- */
-
-kern_return_t thread_get_state_KERNEL(
-	mach_port_t	thread_port,	/* port right for thread */
-	int		flavor,
-	thread_state_t	old_state,	/* pointer to OUT array */
-	natural_t	*old_state_count)	/* IN/OUT */
-{
-	thread_t	thread;
-	kern_return_t	result;
-
-	thread = port_name_to_thread(thread_port);
-	result = thread_get_state(thread, flavor, old_state, old_state_count);
-	thread_deallocate(thread);
-
-	return result;
-}
-
-kern_return_t thread_set_state_KERNEL(
-	mach_port_t	thread_port,	/* port right for thread */
-	int		flavor,
-	thread_state_t	new_state,
-	natural_t	new_state_count)
-{
-	thread_t	thread;
-	kern_return_t	result;
-
-	thread = port_name_to_thread(thread_port);
-	result = thread_set_state(thread, flavor, new_state, new_state_count);
-	thread_deallocate(thread);
-
-	return result;
-}
-
-/*
  *	Things to keep in mind:
  *
  *	The idea here is to duplicate the semantics of the true kernel RPC.
@@ -619,13 +588,13 @@ kern_return_t thread_set_state_KERNEL(
 
 kern_return_t
 syscall_vm_map(
-	mach_port_t	target_map,
-	vm_offset_t	*address,
-	vm_size_t	size,
-	vm_offset_t	mask,
+	mach_port_name_t	target_map,
+	rpc_vm_offset_t	*address,
+	rpc_vm_size_t	size,
+	rpc_vm_offset_t	mask,
 	boolean_t	anywhere,
-	mach_port_t	memory_object,
-	vm_offset_t	offset,
+	mach_port_name_t	memory_object,
+	rpc_vm_offset_t	offset,
 	boolean_t	copy,
 	vm_prot_t	cur_protection,
 	vm_prot_t	max_protection,
@@ -640,7 +609,7 @@ syscall_vm_map(
 	if (map == VM_MAP_NULL)
 		return MACH_SEND_INTERRUPTED;
 
-	if (MACH_PORT_VALID(memory_object)) {
+	if (MACH_PORT_NAME_VALID(memory_object)) {
 		result = ipc_object_copyin(current_space(), memory_object,
 					   MACH_MSG_TYPE_COPY_SEND,
 					   (ipc_object_t *) &port);
@@ -649,14 +618,14 @@ syscall_vm_map(
 			return result;
 		}
 	} else
-		port = (ipc_port_t) memory_object;
+		port = (ipc_port_t)invalid_name_to_port(memory_object);
 
-	copyin(address, &addr, sizeof(vm_offset_t));
+	copyin_address(address, &addr);
 	result = vm_map(map, &addr, size, mask, anywhere,
 			port, offset, copy,
 			cur_protection, max_protection,	inheritance);
 	if (result == KERN_SUCCESS)
-		copyout(&addr, address, sizeof(vm_offset_t));
+		copyout_address(&addr, address);
 	if (IP_VALID(port))
 		ipc_port_release_send(port);
 	vm_map_deallocate(map);
@@ -665,9 +634,9 @@ syscall_vm_map(
 }
 
 kern_return_t syscall_vm_allocate(
-	mach_port_t		target_map,
-	vm_offset_t		*address,
-	vm_size_t		size,
+	mach_port_name_t	target_map,
+	rpc_vm_offset_t		*address,
+	rpc_vm_size_t		size,
 	boolean_t		anywhere)
 {
 	vm_map_t		map;
@@ -678,19 +647,19 @@ kern_return_t syscall_vm_allocate(
 	if (map == VM_MAP_NULL)
 		return MACH_SEND_INTERRUPTED;
 
-	copyin(address, &addr, sizeof(vm_offset_t));
+	copyin_address(address, &addr);
 	result = vm_allocate(map, &addr, size, anywhere);
 	if (result == KERN_SUCCESS)
-		copyout(&addr, address, sizeof(vm_offset_t));
+		copyout_address(&addr, address);
 	vm_map_deallocate(map);
 
 	return result;
 }
 
 kern_return_t syscall_vm_deallocate(
-	mach_port_t		target_map,
-	vm_offset_t		start,
-	vm_size_t		size)
+	mach_port_name_t       	target_map,
+	rpc_vm_offset_t		start,
+	rpc_vm_size_t		size)
 {
 	vm_map_t		map;
 	kern_return_t		result;
@@ -706,13 +675,13 @@ kern_return_t syscall_vm_deallocate(
 }
 
 kern_return_t syscall_task_create(
-	mach_port_t	parent_task,
-	boolean_t	inherit_memory,
-	mach_port_t	*child_task)		/* OUT */
+	mach_port_name_t	parent_task,
+	boolean_t			inherit_memory,
+	mach_port_name_t	*child_task)		/* OUT */
 {
 	task_t		t, c;
 	ipc_port_t	port;
-	mach_port_t 	name;
+	mach_port_name_t 	name;
 	kern_return_t	result;
 
 	t = port_name_to_task(parent_task);
@@ -726,15 +695,14 @@ kern_return_t syscall_task_create(
 		(void) ipc_kmsg_copyout_object(current_space(),
 					       (ipc_object_t) port,
 					       MACH_MSG_TYPE_PORT_SEND, &name);
-		copyout(&name, child_task,
-			sizeof(mach_port_t));
+		copyout(&name, child_task, sizeof(mach_port_name_t));
 	}
 	task_deallocate(t);
 
 	return result;
 }
 
-kern_return_t syscall_task_terminate(mach_port_t task)
+kern_return_t syscall_task_terminate(mach_port_name_t task)
 {
 	task_t		t;
 	kern_return_t	result;
@@ -749,7 +717,7 @@ kern_return_t syscall_task_terminate(mach_port_t task)
 	return result;
 }
 
-kern_return_t syscall_task_suspend(mach_port_t task)
+kern_return_t syscall_task_suspend(mach_port_name_t task)
 {
 	task_t		t;
 	kern_return_t	result;
@@ -765,9 +733,9 @@ kern_return_t syscall_task_suspend(mach_port_t task)
 }
 
 kern_return_t syscall_task_set_special_port(
-	mach_port_t	task,
+	mach_port_name_t	task,
 	int		which_port,
-	mach_port_t	port_name)
+	mach_port_name_t	port_name)
 {
 	task_t		t;
 	ipc_port_t	port;
@@ -777,7 +745,7 @@ kern_return_t syscall_task_set_special_port(
 	if (t == TASK_NULL)
 		return MACH_SEND_INTERRUPTED;
 
-	if (MACH_PORT_VALID(port_name)) {
+	if (MACH_PORT_NAME_VALID(port_name)) {
 		result = ipc_object_copyin(current_space(), port_name,
 					   MACH_MSG_TYPE_COPY_SEND,
 					   (ipc_object_t *) &port);
@@ -786,7 +754,7 @@ kern_return_t syscall_task_set_special_port(
 			return result;
 		}
 	} else
-		port = (ipc_port_t) port_name;
+		port = (ipc_port_t)invalid_name_to_port(port_name);
 
 	result = task_set_special_port(t, which_port, port);
 	if ((result != KERN_SUCCESS) && IP_VALID(port))
@@ -798,12 +766,12 @@ kern_return_t syscall_task_set_special_port(
 
 kern_return_t
 syscall_mach_port_allocate(
-	mach_port_t 		task,
+	mach_port_name_t 	task,
 	mach_port_right_t 	right,
-	mach_port_t 		*namep)
+	mach_port_name_t 	*namep)
 {
 	ipc_space_t space;
-	mach_port_t name;
+	mach_port_name_t name;
 	kern_return_t kr;
 
 	space = port_name_to_space(task);
@@ -812,7 +780,9 @@ syscall_mach_port_allocate(
 
 	kr = mach_port_allocate(space, right, &name);
 	if (kr == KERN_SUCCESS)
-		copyout(&name, namep, sizeof(mach_port_t));
+	{
+		copyout(&name, namep, sizeof(mach_port_name_t));
+	}
 	is_release(space);
 
 	return kr;
@@ -820,9 +790,9 @@ syscall_mach_port_allocate(
 
 kern_return_t
 syscall_mach_port_allocate_name(
-	mach_port_t 		task,
+	mach_port_name_t 	task,
 	mach_port_right_t 	right,
-	mach_port_t 		name)
+	mach_port_name_t 	name)
 {
 	ipc_space_t space;
 	kern_return_t kr;
@@ -839,8 +809,8 @@ syscall_mach_port_allocate_name(
 
 kern_return_t
 syscall_mach_port_deallocate(
-	mach_port_t task,
-	mach_port_t name)
+	mach_port_name_t task,
+	mach_port_name_t name)
 {
 	ipc_space_t space;
 	kern_return_t kr;
@@ -857,9 +827,9 @@ syscall_mach_port_deallocate(
 
 kern_return_t
 syscall_mach_port_insert_right(
-	mach_port_t 		task,
-	mach_port_t 		name,
-	mach_port_t 		right,
+	mach_port_name_t 		task,
+	mach_port_name_t 		name,
+	mach_port_name_t 		right,
 	mach_msg_type_name_t 	rightType)
 {
 	ipc_space_t space;
@@ -876,7 +846,7 @@ syscall_mach_port_insert_right(
 		return KERN_INVALID_VALUE;
 	}
 
-	if (MACH_PORT_VALID(right)) {
+	if (MACH_PORT_NAME_VALID(right)) {
 		kr = ipc_object_copyin(current_space(), right, rightType,
 				       &object);
 		if (kr != KERN_SUCCESS) {
@@ -884,7 +854,7 @@ syscall_mach_port_insert_right(
 			return kr;
 		}
 	} else
-		object = (ipc_object_t) right;
+		object = (ipc_object_t)invalid_name_to_port(right);
 	newtype = ipc_object_copyin_type(rightType);
 
 	kr = mach_port_insert_right(space, name, (ipc_port_t) object, newtype);
@@ -895,7 +865,7 @@ syscall_mach_port_insert_right(
 	return kr;
 }
 
-kern_return_t syscall_thread_depress_abort(mach_port_t thread)
+kern_return_t syscall_thread_depress_abort(mach_port_name_t thread)
 {
 	thread_t	t;
 	kern_return_t	result;
@@ -911,15 +881,55 @@ kern_return_t syscall_thread_depress_abort(mach_port_t thread)
 }
 
 /*
+ *	Routine:	thread_set_self_state [mach trap]
+ *	Purpose:
+ *		Set current thread's state, as if with
+ *		thread_set_state() RPC.
+ *
+ *		When setting the generic state (one that contains
+ *		the register used for syscall return value) succeeds,
+ *		the successful return does not overwire the just-set
+ *		register value.
+ *	Conditions:
+ *		Nothing locked.
+ *	Returns:
+ *		Nothing at all		Successfully set generic state.
+ *		KERN_SUCCESS		Successfully set other state.
+ *		KERN_INVALID_ARGUMENT	Invalid flavor or state.
+ */
+kern_return_t thread_set_self_state(
+	int		flavor,
+	thread_state_t	new_state,
+	natural_t	new_state_count)
+{
+	thread_t	t = current_thread();
+	kern_return_t	kr;
+	natural_t	new_state_copy[150];
+
+	if (new_state_count <= 0 || new_state_count > 150)
+		return KERN_INVALID_ARGUMENT;
+
+	if (copyin(new_state, new_state_copy, new_state_count * sizeof(natural_t)))
+		return KERN_INVALID_ARGUMENT;
+
+	thread_set_syscall_return(t, KERN_SUCCESS);
+	kr = thread_setstatus(t, flavor, new_state_copy, new_state_count);
+	if (kr == KERN_SUCCESS)
+		thread_exception_return();
+
+	return kr;
+}
+
+/*
  * Device traps -- these are way experimental.
  */
 io_return_t
-syscall_device_write_request(mach_port_t	device_name,
-			     mach_port_t	reply_name,
+syscall_device_write_request(mach_port_name_t	device_name,
+			     mach_port_name_t	reply_name,
 			     dev_mode_t		mode,
-			     recnum_t		recnum,
-			     vm_offset_t	data,
-			     vm_size_t		data_count)
+			     rpc_recnum_t	recnum,
+			     rpc_vm_offset_t	data,
+			     rpc_vm_size_t	data_count)
 {
 	device_t	dev;
 	/*ipc_port_t	reply_port;*/
@@ -965,12 +975,12 @@ syscall_device_write_request(mach_port_t	device_name,
 }
 
 io_return_t
-syscall_device_writev_request(mach_port_t	device_name,
-			      mach_port_t	reply_name,
+syscall_device_writev_request(mach_port_name_t	device_name,
+			      mach_port_name_t	reply_name,
 			      dev_mode_t	mode,
-			      recnum_t		recnum,
-			      io_buf_vec_t	*iovec,
-			      vm_size_t		iocount)
+			      rpc_recnum_t	recnum,
+			      rpc_io_buf_vec_t	*iovec,
+			      rpc_vm_size_t	iocount)
 {
 	device_t	dev;
 	/*ipc_port_t	reply_port;*/

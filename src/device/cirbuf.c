@@ -51,10 +51,10 @@ void
 cb_check(struct cirbuf *cb)
 {
 	if (!(cb->c_cf >= cb->c_start && cb->c_cf < cb->c_end))
-	    panic("cf %x out of range [%x..%x)",
+	    panic("cf %p out of range [%p..%p)",
 		cb->c_cf, cb->c_start, cb->c_end);
 	if (!(cb->c_cl >= cb->c_start && cb->c_cl < cb->c_end))
-	    panic("cl %x out of range [%x..%x)",
+	    panic("cl %p out of range [%p..%p)",
 		cb->c_cl, cb->c_start, cb->c_end);
 	if (cb->c_cf <= cb->c_cl) {
 	    if (!(cb->c_cc == cb->c_cl - cb->c_cf))
@@ -200,31 +200,6 @@ b_to_q( char	*cp,
 	}
 	CB_CHECK(cb);
 	return count;
-}
-
-/*
- * Return number of contiguous characters up to a character
- * that matches the mask.
- */
-int
-ndqb(	struct cirbuf *cb,
-	int	mask)
-{
-	char *cp, *lim;
-
-	if (cb->c_cl < cb->c_cf)
-	    lim = cb->c_end;
-	else
-	    lim = cb->c_cl;
-	if (mask == 0)
-	    return (lim - cb->c_cf);
-	cp = cb->c_cf;
-	while (cp < lim) {
-	    if (*cp & mask)
-		break;
-	    cp++;
-	}
-	return (cp - cb->c_cf);
 }
 
 /*

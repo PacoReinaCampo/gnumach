@@ -54,6 +54,7 @@
 #include <mach/vm_param.h>
 #include <kern/thread.h>
 #include <kern/printf.h>
+#include <kern/mach_host.server.h>
 #include <vm/vm_map.h>
 #include <vm/vm_page.h>
 #include <device/device_types.h>
@@ -234,7 +235,10 @@ do_gettimeofday (struct timeval *tv)
    * expensive, and the host argument is not used by host_get_time (),
    * only checked not to be HOST_NULL.
    */
-  host_get_time ((host_t) 1, (time_value_t *) tv);
+  time_value64_t tv64;
+  host_get_time64 ((host_t) 1, &tv64);
+  tv->tv_sec = tv64.seconds;
+  tv->tv_usec = tv64.nanoseconds / 1000;
 }
 
 int

@@ -27,9 +27,10 @@
 #include <mach/mach_types.h>
 #include <mach/vm_param.h>
 #include <kern/assert.h>
+#include <kern/cpu_number.h>
 
 #include <i386/spl.h>
-#include <i386/pic.h>
+#include <i386/irq.h>
 #include <i386/pit.h>
 
 #define MACH_INCLUDE
@@ -48,7 +49,7 @@
 #include <asm/hardirq.h>
 
 #include <linux/dev/glue/glue.h>
-#include <machine/machspl.h>
+#include <machine/spl.h>
 
 #include <device/intr.h>
 
@@ -84,13 +85,7 @@ struct linux_action
   user_intr_t *user_intr;
 };
 
-static struct linux_action *irq_action[16] =
-{
-  NULL, NULL, NULL, NULL,
-  NULL, NULL, NULL, NULL,
-  NULL, NULL, NULL, NULL,
-  NULL, NULL, NULL, NULL
-};
+static struct linux_action *irq_action[NINTR] = {0};
 
 /*
  * Generic interrupt handler for Linux devices.
@@ -232,7 +227,7 @@ install_user_intr_handler (struct irqdev *dev, int id, unsigned long flags,
 
   unsigned int irq = dev->irq[id];
 
-  assert (irq < 16);
+  assert (irq < NINTR);
 
   /* Test whether the irq handler has been set */
   // TODO I need to protect the array when iterating it.
@@ -279,7 +274,7 @@ request_irq (unsigned int irq, void (*handler) (int, void *, struct pt_regs *),
   struct linux_action *action;
   int retval;
 
-  assert (irq < 16);
+  assert (irq < NINTR);
 
   if (!handler)
     return -EINVAL;
@@ -315,7 +310,7 @@ free_irq (unsigned int irq, void *dev_id)
   struct linux_action *action, **p;
   unsigned long flags;
 
-  if (irq > 15)
+  if (irq >= NINTR)
     panic ("free_irq: bad irq number");
 
   for (p = irq_action + irq; (action = *p) != NULL; p = &action->next)
@@ -349,12 +344,12 @@ probe_irq_on (void)
   unsigned i, irqs = 0;
   unsigned long delay;
 
-  assert (curr_ipl == 0);
+  assert (curr_ipl[cpu_number()] == 0);
 
   /*
    * Allocate all available IRQs.
    */
-  for (i = 15; i > 0; i--)
+  for (i = NINTR - 1; i > 0; i--)
     {
       if (!irq_action[i] && ivect[i] == intnull)
 	{
@@ -369,7 +364,7 @@ probe_irq_on (void)
   for (delay = jiffies + HZ / 10; delay > jiffies;)
     ;
 
-  return (irqs & ~curr_pic_mask);
+  return (irqs & ~linux_pic_mask);
 }
 
 /*
@@ -380,14 +375,14 @@ probe_irq_off (unsigned long irqs)
 {
   unsigned int i;
 
-  assert (curr_ipl == 0);
+  assert (curr_ipl[cpu_number()] == 0);
 
-  irqs &= curr_pic_mask;
+  irqs &= linux_pic_mask;
 
   /*
    * Disable unnecessary IRQs.
    */
-  for (i = 15; i > 0; i--)
+  for (i = NINTR - 1; i > 0; i--)
     {
       if (!irq_action[i] && ivect[i] == intnull)
 	{
@@ -427,7 +422,7 @@ reserve_mach_irqs (void)
 {
   unsigned int i;
 
-  for (i = 0; i < 16; i++)
+  for (i = 0; i < NINTR; i++)
     {
       if (ivect[i] != intnull)
 	/* This dummy action does not specify SA_SHIRQ, so
@@ -720,18 +715,20 @@ init_IRQ (void)
    */
   (void) splhigh ();
   
+#ifndef APIC
   /*
    * Program counter 0 of 8253 to interrupt hz times per second.
    */
   outb_p (PIT_C0 | PIT_SQUAREMODE | PIT_READMODE, PITCTL_PORT);
   outb_p (latch & 0xff, PITCTR0_PORT);
   outb (latch >> 8, PITCTR0_PORT);
-  
+
   /*
    * Install our clock interrupt handler.
    */
   old_clock_handler = ivect[0];
   ivect[0] = linux_timer_intr;
+#endif
 
   reserve_mach_irqs ();
 
@@ -743,7 +740,7 @@ init_IRQ (void)
   /*
    * Check if the machine has an EISA bus.
    */
-  p = (char *) 0x0FFFD9;
+  p = (char *) phystokv(0x0FFFD9);
   if (*p++ == 'E' && *p++ == 'I' && *p++ == 'S' && *p == 'A')
     EISA_bus = 1;
   
@@ -768,9 +765,11 @@ restore_IRQ (void)
    */
   (void) splhigh ();
   
+#ifndef APIC
   /*
    * Restore clock interrupt handler.
    */
   ivect[0] = old_clock_handler;
+#endif
 }
   

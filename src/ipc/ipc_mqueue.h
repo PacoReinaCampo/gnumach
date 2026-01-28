@@ -68,14 +68,14 @@ extern mach_msg_return_t
 ipc_mqueue_send(ipc_kmsg_t, mach_msg_option_t, mach_msg_timeout_t);
 
 extern mach_msg_return_t
-ipc_mqueue_copyin(ipc_space_t, mach_port_t, ipc_mqueue_t *, ipc_object_t *);
+ipc_mqueue_copyin(ipc_space_t, mach_port_name_t, ipc_mqueue_t *, ipc_object_t *);
 
 #define	IMQ_NULL_CONTINUE	((void (*)()) 0)
 
 extern mach_msg_return_t
 ipc_mqueue_receive(ipc_mqueue_t, mach_msg_option_t,
 		   mach_msg_size_t, mach_msg_timeout_t,
-		   boolean_t, void (*)(),
+		   boolean_t, continuation_t,
 		   ipc_kmsg_t *, mach_port_seqno_t *);
 
 /*

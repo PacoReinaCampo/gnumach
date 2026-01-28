@@ -27,8 +27,8 @@
  * Fault recovery in copyin/copyout routines.
  */
 struct recovery {
-	int	fault_addr;
-	int	recover_addr;
+	vm_offset_t	fault_addr;
+	vm_offset_t	recover_addr;
 };
 
 extern struct recovery recover_table[];
@@ -48,17 +48,24 @@ extern int call_continuation (continuation_t continuation);
 extern int discover_x86_cpu_type (void);
 
 extern int copyin (const void *userbuf, void *kernelbuf, size_t cn);
-extern int copyinmsg (const void *userbuf, void *kernelbuf, size_t cn);
+extern int copyinmsg (const void *userbuf, void *kernelbuf, size_t cn, size_t kn);
 extern int copyout (const void *kernelbuf, void *userbuf, size_t cn);
+#ifdef USER32
 extern int copyoutmsg (const void *kernelbuf, void *userbuf, size_t cn);
+#else
+static inline int copyoutmsg (const void *kernelbuf, void *userbuf, size_t cn) {
+	return copyout (kernelbuf, userbuf, cn);
+}
+#endif
 
 extern int inst_fetch (int eip, int cs);
 
 extern void cpu_shutdown (void);
 
 extern int syscall (void);
+extern int syscall64 (void);
 
-extern unsigned int cpu_features[1];
+extern unsigned int cpu_features[2];
 
 #define CPU_FEATURE_FPU		 0
 #define CPU_FEATURE_VME		 1
@@ -89,6 +96,7 @@ extern unsigned int cpu_features[1];
 #define CPU_FEATURE_HTT		28
 #define CPU_FEATURE_TM		29
 #define CPU_FEATURE_PBE		31
+#define CPU_FEATURE_XSAVE	(1*32 + 26)
 
 #define CPU_HAS_FEATURE(feature) (cpu_features[(feature) / 32] & (1 << ((feature) % 32)))
 

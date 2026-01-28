@@ -60,17 +60,36 @@
 #include <machine/sched_param.h>
 
 #endif	/* STAT_TIME */
-#define NRQS	64			/* 64 run queues per cpu */
+#define NRQS	65			/* 65 run queues per cpu */
 
 struct run_queue {
 	queue_head_t		runq[NRQS];	/* one for each priority */
-	decl_simple_lock_data(,	lock)		/* one lock for all queues */
+	decl_simple_lock_data(,	lock)		/* one lock for all queues,
+						   shall be taken at splsched
+						   only */
 	int			low;		/* low queue value */
 	int			count;		/* count of threads runable */
 };
 
 typedef struct run_queue	*run_queue_t;
 #define RUN_QUEUE_NULL	((run_queue_t) 0)
+
+/* Shall be taken at splsched only */
+#ifdef MACH_LDEBUG
+#define runq_lock(rq)		\
+MACRO_BEGIN \
+	assert_splsched(); \
+	simple_lock_nocheck(&(rq)->lock); \
+MACRO_END
+#define runq_unlock(rq)	\
+MACRO_BEGIN \
+	assert_splsched(); \
+	simple_unlock_nocheck(&(rq)->lock); \
+MACRO_END
+#else
+#define runq_lock(rq)		simple_lock_nocheck(&(rq)->lock)
+#define runq_unlock(rq)	simple_unlock_nocheck(&(rq)->lock)
+#endif
 
 #if	MACH_FIXPRI
 /*

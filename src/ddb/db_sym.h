@@ -94,7 +94,7 @@ extern boolean_t	db_qualify_ambiguous_names;
 extern boolean_t	db_add_symbol_table( 	int type,
 						char * start,
 						char * end,
-						char *name,
+						const char *name,
 						char *ref,
 						char *map_pointer );
 
@@ -115,6 +115,10 @@ extern void	db_symbol_values( db_symtab_t *stab,
 				  db_sym_t sym,
 				  char** namep,
 				  db_expr_t* valuep);
+
+/* find symbol in current task */
+#define db_search_symbol(val,strgy,offp)	\
+	db_search_task_symbol(val,strgy,offp,0)
 
 /* find name&value given approx val */
 
@@ -157,10 +161,6 @@ extern void	db_symbol_values( db_symtab_t *stab,
 	  db_free_symbol(s);						\
 	} while(0);
 
-/* find symbol in current task */
-#define db_search_symbol(val,strgy,offp)	\
-	db_search_task_symbol(val,strgy,offp,0)
-
 /* strcmp, modulo leading char */
 extern boolean_t	db_eqname( const char* src, const char* dst, char c );
 
@@ -186,7 +186,7 @@ extern struct db_sym_switch {
 	boolean_t	(*init)(
 				char *start,
 				char *end,
-				char *name,
+				const char *name,
 				char *task_addr
 				);
 
@@ -222,7 +222,7 @@ extern struct db_sym_switch {
 } x_db[];
 
 #ifndef	symtab_type
-#define	symtab_type(s)		SYMTAB_AOUT
+#define	symtab_type(s)		SYMTAB_ELF
 #endif
 
 #define	X_db_sym_init(s,e,n,t)		x_db[symtab_type(s)].init(s,e,n,t)
@@ -237,12 +237,6 @@ extern boolean_t db_line_at_pc(
 	char **filename,
 	int *linenum,
 	db_addr_t pc);
-
-extern boolean_t aout_db_sym_init(
-	char *symtab,
-	char *esymtab,
-	char *name,
-	char *task_addr);
 
 extern boolean_t elf_db_sym_init (
 	unsigned shdr_num,
@@ -263,7 +257,7 @@ db_search_in_task_symbol(
 
 extern db_sym_t
 db_sym_parse_and_lookup(
-	db_sym_t	(*func)(),
+	db_sym_t	(*func) (db_symtab_t *, const char*, const char*, int),
 	db_symtab_t	*symtab,
 	char		*symstr);
 

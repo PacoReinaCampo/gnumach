@@ -108,7 +108,7 @@ void hyp_block_init(void) {
 	domid_t domid;
 	evtchn_port_t evt;
 	hyp_store_transaction_t t;
-	vm_offset_t addr;
+	phys_addr_t addr;
 	struct block_data *bd;
 	blkif_sring_t	*ring;
 
@@ -349,7 +349,7 @@ device_close(void *devp)
 
 static io_return_t
 device_open (ipc_port_t reply_port, mach_msg_type_name_t reply_port_type,
-	    dev_mode_t mode, char *name, device_t *devp /* out */)
+	    dev_mode_t mode, const char *name, device_t *devp /* out */)
 {
 	int i;
 	ipc_port_t port, notify;
@@ -457,7 +457,7 @@ device_read (void *d, ipc_port_t reply_port,
       /* Allocate pages.  */
       while (alloc_offset < offset + len)
 	{
-	  while ((m = vm_page_grab ()) == 0)
+	  while ((m = vm_page_grab (VM_PAGE_DIRECTMAP)) == 0)
 	    VM_PAGE_WAIT (0);
 	  assert (! m->active && ! m->inactive);
 	  m->busy = TRUE;
@@ -573,7 +573,7 @@ device_write(void *d, ipc_port_t reply_port,
   vm_offset_t map_addr;
   vm_size_t map_size;
   unsigned copy_npages = atop(round_page(count));
-  vm_offset_t phys_addrs[copy_npages];
+  phys_addr_t phys_addrs[copy_npages];
   struct block_data *bd = d;
   blkif_request_t *req;
   grant_ref_t gref[BLKIF_MAX_SEGMENTS_PER_REQUEST];
@@ -666,7 +666,7 @@ device_write(void *d, ipc_port_t reply_port,
       hyp_grant_takeback(gref[j]);
 
     if (err) {
-      printf("error writing %u bytes at sector %d\n", count, bn);
+      printf("error writing %u bytes at sector %ld\n", count, bn);
       break;
     }
   }

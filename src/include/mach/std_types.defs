@@ -30,9 +30,6 @@
 #ifndef	_MACH_STD_TYPES_DEFS_
 #define _MACH_STD_TYPES_DEFS_
 
-type char = MACH_MSG_TYPE_CHAR;
-type short = MACH_MSG_TYPE_INTEGER_16;
-type int = MACH_MSG_TYPE_INTEGER_32;
 type int32_t = MACH_MSG_TYPE_INTEGER_32;
 type int64_t = MACH_MSG_TYPE_INTEGER_64;
 type boolean_t = MACH_MSG_TYPE_BOOLEAN;
@@ -58,10 +55,8 @@ type mach_port_t = MACH_MSG_TYPE_COPY_SEND
 ;
 type mach_port_array_t = array[] of mach_port_t;
 
-type mach_port_name_t = MACH_MSG_TYPE_PORT_NAME
-	ctype: mach_port_t;
-type mach_port_name_array_t = array[] of mach_port_name_t
-	ctype: mach_port_array_t;
+type mach_port_name_t = MACH_MSG_TYPE_PORT_NAME;
+type mach_port_name_array_t = array[] of mach_port_name_t;
 
 type mach_port_right_t = natural_t;
 

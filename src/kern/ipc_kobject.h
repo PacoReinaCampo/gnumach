@@ -77,9 +77,10 @@ typedef unsigned int ipc_kobject_type_t;
 #define IKOT_CLOCK		25
 #define IKOT_CLOCK_CTRL		26
 #define	IKOT_PAGER_PROXY	27
+#define	IKOT_USER_DEVICE	28
 					/* << new entries here	*/
-#define	IKOT_UNKNOWN		28	/* magic catchall	*/
-#define	IKOT_MAX_TYPE		29	/* # of IKOT_ types	*/
+#define	IKOT_UNKNOWN		29	/* magic catchall	*/
+#define	IKOT_MAX_TYPE		30	/* # of IKOT_ types	*/
  /* Please keep ipc/ipc_object.c:ikot_print_array up to date	*/
 
 #define is_ipc_kobject(ikot)	(ikot != IKOT_NONE)
@@ -90,7 +91,9 @@ typedef unsigned int ipc_kobject_type_t;
  */
 
 #define ipc_kobject_vm_page_list(ikot) 			\
-	((ikot == IKOT_PAGING_REQUEST) || (ikot == IKOT_DEVICE))
+  ((ikot == IKOT_PAGING_REQUEST) || \
+   (ikot == IKOT_DEVICE) || \
+   (ikot == IKOT_USER_DEVICE))
 
 #define ipc_kobject_vm_page_steal(ikot)	(ikot == IKOT_PAGING_REQUEST)
 
@@ -105,6 +108,13 @@ extern ipc_kmsg_t ipc_kobject_server(
 
 /* Make a port represent a kernel object of the given type */
 extern void ipc_kobject_set(
+	ipc_port_t		port,
+	ipc_kobject_t		kobject,
+	ipc_kobject_type_t	type);
+
+/* As ipc_kobject_set but with the condition that 'port' is
+ already locked by the caller. */
+extern void ipc_kobject_set_locked(
 	ipc_port_t		port,
 	ipc_kobject_t		kobject,
 	ipc_kobject_type_t	type);

@@ -39,6 +39,7 @@
 #include <i386/pmap.h>
 #include <i386/proc_reg.h>
 #include <i386/locore.h>
+#include <i386at/biosmem.h>
 #include "gdt.h"
 #include "trap.h"
 
@@ -56,8 +57,9 @@
 #include <ddb/db_task_thread.h>
 #include <ddb/db_trap.h>
 #include <ddb/db_watch.h>
+#include <ddb/db_mp.h>
 #include <machine/db_interface.h>
-#include <machine/machspl.h>
+#include <machine/spl.h>
 
 #if MACH_KDB
 /* Whether the kernel uses any debugging register.  */
@@ -98,7 +100,9 @@ void db_load_context(pcb_t pcb)
 }
 
 void cpu_interrupt_to_db(int i){
-	printf("TODO: cpu_interrupt_to_db\n");
+#if MACH_KDB && NCPUS > 1
+	db_on(i);
+#endif
 }
 
 void db_get_debug_state(
@@ -115,8 +119,8 @@ kern_return_t db_set_debug_state(
 	int i;
 
 	for (i = 0; i <= 3; i++)
-		if (state->dr[i] < VM_MIN_ADDRESS
-	 	 || state->dr[i] >= VM_MAX_ADDRESS)
+		if (state->dr[i] < VM_MIN_USER_ADDRESS
+		 || state->dr[i] >= VM_MAX_USER_ADDRESS)
 			return KERN_INVALID_ARGUMENT;
 
 	pcb->ims.ids = *state;
@@ -232,7 +236,7 @@ db_clear_hw_watchpoint(
 /*
  * Print trap reason.
  */
-void
+static void
 kdbprinttrap(
 	int	type, 
 	int	code)
@@ -328,12 +332,13 @@ kdb_trap(
 	    regs->ebp    = ddb_regs.ebp;
 	    regs->esi    = ddb_regs.esi;
 	    regs->edi    = ddb_regs.edi;
-	    regs->es     = ddb_regs.es & 0xffff;
 	    regs->cs     = ddb_regs.cs & 0xffff;
+#if !defined(__x86_64__) || defined(USER32)
+	    regs->es     = ddb_regs.es & 0xffff;
 	    regs->ds     = ddb_regs.ds & 0xffff;
 	    regs->fs     = ddb_regs.fs & 0xffff;
 	    regs->gs     = ddb_regs.gs & 0xffff;
-
+#endif
 	    if ((type == T_INT3) &&
 		(db_get_task_value(regs->eip, BKPT_SIZE, FALSE, TASK_NULL)
 								 == BKPT_INST))
@@ -397,11 +402,12 @@ kdb_kentry(
 	    ddb_regs.esi = is->rsi;
 	    ddb_regs.edi = is->rdi;
 #endif
+#if !defined(__x86_64__) || defined(USER32)
 	    ddb_regs.ds  = is->ds;
 	    ddb_regs.es  = is->es;
 	    ddb_regs.fs  = is->fs;
 	    ddb_regs.gs  = is->gs;
-
+#endif
 	    cnpollc(TRUE);
 	    db_task_trap(-1, 0, (ddb_regs.cs & 0x3) != 0);
 	    cnpollc(FALSE);
@@ -426,10 +432,12 @@ kdb_kentry(
 	    is->rsi = ddb_regs.esi;
 	    is->rdi = ddb_regs.edi;
 #endif
+#if !defined(__x86_64__) || defined(USER32)
 	    is->ds  = ddb_regs.ds & 0xffff;
 	    is->es  = ddb_regs.es & 0xffff;
 	    is->fs  = ddb_regs.fs & 0xffff;
 	    is->gs  = ddb_regs.gs & 0xffff;
+#endif
 	}
 #if	NCPUS > 1
 	db_leave();
@@ -440,11 +448,11 @@ kdb_kentry(
 
 boolean_t db_no_vm_fault = TRUE;
 
-int
-db_user_to_kernel_address(
+static int
+db_user_to_phys_address(
 	const task_t	task,
 	vm_offset_t	addr,
-	vm_offset_t	*kaddr,
+	phys_addr_t	*paddr,
 	int		flag)
 {
 	pt_entry_t *ptp;
@@ -469,7 +477,29 @@ db_user_to_kernel_address(
 	    }
 	    return(-1);
 	}
-	*kaddr = ptetokv(*ptp) + (addr & (INTEL_PGBYTES-1));
+
+	*paddr = pte_to_pa(*ptp) + (addr & (INTEL_PGBYTES-1));
+	return(0);
+}
+
+int
+db_user_to_kernel_address(
+	const task_t	task,
+	vm_offset_t	addr,
+	vm_offset_t	*kaddr,
+	int		flag)
+{
+	phys_addr_t paddr;
+
+	if (db_user_to_phys_address(task, addr, &paddr, flag) < 0)
+	    return(-1);
+
+	if (paddr >= biosmem_directmap_end()) {
+	    db_printf("\naddr %016llx is stored in highmem at physical %016llx, accessing it is not supported yet\n", (unsigned long long) addr, (unsigned long long) paddr);
+	    return(-1);
+	}
+
+	*kaddr = phystokv(paddr);
 	return(0);
 }
 
@@ -486,7 +516,7 @@ db_read_bytes(
 {
 	char		*src;
 	int		n;
-	vm_offset_t	kern_addr;
+	phys_addr_t	phys_addr;
 
 	src = (char *)addr;
 	if ((addr >= VM_MIN_KERNEL_ADDRESS && addr < VM_MAX_KERNEL_ADDRESS) || task == TASK_NULL) {
@@ -503,16 +533,15 @@ db_read_bytes(
 	    return TRUE;
 	}
 	while (size > 0) {
-	    if (db_user_to_kernel_address(task, addr, &kern_addr, 1) < 0)
+	    if (db_user_to_phys_address(task, addr, &phys_addr, 1) < 0)
 		return FALSE;
-	    src = (char *)kern_addr;
 	    n = intel_trunc_page(addr+INTEL_PGBYTES) - addr;
 	    if (n > size)
 		n = size;
 	    size -= n;
 	    addr += n;
-	    while (--n >= 0)
-		*data++ = *src++;
+	    copy_from_phys(phys_addr, (vm_offset_t) data, n);
+	    data += n;
 	}
 	return TRUE;
 }
@@ -595,21 +624,18 @@ db_write_bytes_user_space(
 	char		*data,
 	task_t		task)
 {
-	char		*dst;
 	int		n;
-	vm_offset_t	kern_addr;
+	phys_addr_t	phys_addr;
 
 	while (size > 0) {
-	    if (db_user_to_kernel_address(task, addr, &kern_addr, 1) < 0)
+	    if (db_user_to_phys_address(task, addr, &phys_addr, 1) < 0)
 		return;
-	    dst = (char *)kern_addr;
 	    n = intel_trunc_page(addr+INTEL_PGBYTES) - addr;
 	    if (n > size)
 		n = size;
 	    size -= n;
 	    addr += n;
-	    while (--n >= 0)
-		*dst++ = *data++;
+	    copy_to_phys((vm_offset_t) data, phys_addr, n);
 	}
 }
 
@@ -620,7 +646,7 @@ db_check_access(
 	task_t		task)
 {
 	int	n;
-	vm_offset_t	kern_addr;
+	phys_addr_t	phys_addr;
 
 	if (addr >= VM_MIN_KERNEL_ADDRESS) {
 	    if (kernel_task == TASK_NULL)
@@ -632,7 +658,7 @@ db_check_access(
 	    task = current_thread()->task;
 	}
 	while (size > 0) {
-	    if (db_user_to_kernel_address(task, addr, &kern_addr, 0) < 0)
+	    if (db_user_to_phys_address(task, addr, &phys_addr, 0) < 0)
 		return FALSE;
 	    n = intel_trunc_page(addr+INTEL_PGBYTES) - addr;
 	    if (n > size)
@@ -650,7 +676,7 @@ db_phys_eq(
 	const task_t	task2,
 	vm_offset_t	addr2)
 {
-	vm_offset_t	kern_addr1, kern_addr2;
+	phys_addr_t	phys_addr1, phys_addr2;
 
 	if (addr1 >= VM_MIN_KERNEL_ADDRESS || addr2 >= VM_MIN_KERNEL_ADDRESS)
 	    return FALSE;
@@ -661,10 +687,10 @@ db_phys_eq(
 		return FALSE;
 	    task1 = current_thread()->task;
 	}
-	if (db_user_to_kernel_address(task1, addr1, &kern_addr1, 0) < 0
-		|| db_user_to_kernel_address(task2, addr2, &kern_addr2, 0) < 0)
+	if (db_user_to_phys_address(task1, addr1, &phys_addr1, 0) < 0
+		|| db_user_to_phys_address(task2, addr2, &phys_addr2, 0) < 0)
 	    return FALSE;
-	return(kern_addr1 == kern_addr2);
+	return(phys_addr1 == phys_addr2);
 }
 
 #define DB_USER_STACK_ADDR		(VM_MIN_KERNEL_ADDRESS)

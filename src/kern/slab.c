@@ -79,6 +79,7 @@
 #include <kern/slab.h>
 #include <kern/kalloc.h>
 #include <kern/cpu_number.h>
+#include <kern/mach_debug.server.h>
 #include <mach/vm_param.h>
 #include <mach/machine/vm_types.h>
 #include <vm/vm_kern.h>
@@ -370,7 +371,7 @@ kmem_pagealloc_physmem(vm_size_t size)
     assert(size == PAGE_SIZE);
 
     for (;;) {
-        page = vm_page_grab();
+        page = vm_page_grab(VM_PAGE_DIRECTMAP);
 
         if (page != NULL)
             break;
@@ -415,6 +416,9 @@ kmem_pagealloc_virtual(vm_size_t size, vm_size_t align)
 static void
 kmem_pagefree_virtual(vm_offset_t addr, vm_size_t size)
 {
+    if (addr < kernel_virtual_start || addr + size > kernel_virtual_end)
+	panic("kmem_pagefree_virtual(%lx-%lx) falls in physical memory area!\n",
+		(unsigned long) addr, (unsigned long) addr + size);
     assert(size > PAGE_SIZE);
     size = vm_page_round(size);
     kmem_free(kernel_map, addr, size);
@@ -813,10 +817,10 @@ void kmem_cache_init(struct kmem_cache *cache, const char *name,
 #endif /* SLAB_USE_CPU_POOLS */
     size_t buf_size;
 
-#if SLAB_VERIFY
-    cache->flags = KMEM_CF_VERIFY;
-#else /* SLAB_VERIFY */
     cache->flags = 0;
+#if SLAB_VERIFY
+    if (obj_size < PAGE_SIZE - sizeof(union kmem_bufctl) + sizeof(struct kmem_buftag))
+        cache->flags |= KMEM_CF_VERIFY;
 #endif /* SLAB_VERIFY */
 
     if (flags & KMEM_CACHE_VERIFY)
@@ -1342,7 +1346,7 @@ void kalloc_init(void)
     size = 1 << KALLOC_FIRST_SHIFT;
 
     for (i = 0; i < ARRAY_SIZE(kalloc_caches); i++) {
-        sprintf(name, "kalloc_%lu", size);
+        sprintf(name, "kalloc_%lu", (unsigned long) size);
         kmem_cache_init(&kalloc_caches[i], name, size, 0, NULL, 0);
         size <<= 1;
     }
@@ -1394,6 +1398,8 @@ vm_offset_t kalloc(vm_size_t size)
 
         if ((buf != 0) && (cache->flags & KMEM_CF_VERIFY))
             kalloc_verify(cache, buf, size);
+    } else if (size <= PAGE_SIZE) {
+        buf = (void *)kmem_pagealloc_physmem(PAGE_SIZE);
     } else {
         buf = (void *)kmem_pagealloc_virtual(size, 0);
     }
@@ -1436,6 +1442,8 @@ void kfree(vm_offset_t data, vm_size_t size)
             kfree_verify(cache, (void *)data, size);
 
         kmem_cache_free(cache, data);
+    } else if (size <= PAGE_SIZE) {
+        kmem_pagefree_physmem(data, PAGE_SIZE);
     } else {
         kmem_pagefree_virtual(data, size);
     }
@@ -1488,9 +1496,97 @@ void slab_info(void)
 #if MACH_KDB
 #include <ddb/db_output.h>
 
- void db_show_slab_info(void)
+void db_show_slab_info(void)
 {
     _slab_info(db_printf);
+}
+
+void db_whatis_slab(vm_offset_t a)
+{
+    struct kmem_cache *cache;
+    int done = 0;
+
+#ifndef SLAB_VERIFY
+    db_printf("enabling SLAB_VERIFY is recommended\n");
+#endif
+
+    simple_lock(&kmem_cache_list_lock);
+
+    list_for_each_entry(&kmem_cache_list, cache, node) {
+        if (a >= (vm_offset_t) cache
+                && a < (vm_offset_t) cache + sizeof(*cache))
+            db_printf("Cache %s\n", cache->name);
+
+        simple_lock(&cache->lock);
+
+        if (cache->flags & KMEM_CF_USE_TREE) {
+            struct rbtree_node *node;
+
+            node = rbtree_lookup_nearest(&cache->active_slabs, (void*) a,
+                                         kmem_slab_cmp_lookup, RBTREE_LEFT);
+            if (node) {
+                struct kmem_slab *slab;
+                slab = rbtree_entry(node, struct kmem_slab, tree_node);
+                if (a >= (vm_offset_t) slab->addr
+                        && a < (vm_offset_t) slab->addr + cache->slab_size) {
+                    db_printf("Allocated from cache %s\n", cache->name);
+                    done = 1;
+                    goto out_cache;
+                }
+            }
+        }
+
+        union kmem_bufctl *free;
+        struct kmem_slab *slab;
+
+        list_for_each_entry(&cache->partial_slabs, slab, list_node) {
+            if (a >= (vm_offset_t) slab->addr
+                && a < (vm_offset_t) slab->addr + cache->slab_size) {
+                db_printf("In cache %s\n", cache->name);
+
+                for (free = slab->first_free; free; free = free->next) {
+                    void *buf = kmem_bufctl_to_buf(free, cache);
+
+                    if (a >= (vm_offset_t) buf
+                            && a < (vm_offset_t) buf + cache->buf_size) {
+                        db_printf("  In free list\n");
+                        break;
+                    }
+                }
+
+                done = 1;
+                goto out_cache;
+            }
+        }
+
+        list_for_each_entry(&cache->free_slabs, slab, list_node) {
+            if (a >= (vm_offset_t) slab->addr
+                && a < (vm_offset_t) slab->addr + cache->slab_size) {
+                db_printf("In cache %s\n", cache->name);
+
+                for (free = slab->first_free; free; free = free->next) {
+                    void *buf = kmem_bufctl_to_buf(free, cache);
+
+                    if (a >= (vm_offset_t) buf
+                            && a < (vm_offset_t) buf + cache->buf_size) {
+                        db_printf("  In free list\n");
+                        break;
+                    }
+                }
+
+                done = 1;
+                goto out_cache;
+            }
+        }
+
+out_cache:
+        simple_unlock(&cache->lock);
+        if (done)
+            goto out;
+    }
+
+out:
+    simple_unlock(&kmem_cache_list_lock);
 }
 
 #endif /* MACH_KDB */

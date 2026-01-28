@@ -52,8 +52,8 @@
  *	No rounding is used.
  */
 
-#define i386_btop(x)		(((unsigned long)(x)) >> I386_PGSHIFT)
-#define i386_ptob(x)		(((unsigned long)(x)) << I386_PGSHIFT)
+#define i386_btop(x)		(((phys_addr_t)(x)) >> I386_PGSHIFT)
+#define i386_ptob(x)		(((phys_addr_t)(x)) << I386_PGSHIFT)
 
 /*
  *	Round off or truncate to the nearest page.  These will work
@@ -61,22 +61,29 @@
  *	bytes.)
  */
 
-#define i386_round_page(x)	((((unsigned long)(x)) + I386_PGBYTES - 1) & \
+#define i386_round_page(x)	((((phys_addr_t)(x)) + I386_PGBYTES - 1) & \
 					~(I386_PGBYTES-1))
-#define i386_trunc_page(x)	(((unsigned long)(x)) & ~(I386_PGBYTES-1))
+#define i386_trunc_page(x)	(((phys_addr_t)(x)) & ~(I386_PGBYTES-1))
 
-/* User address spaces are 3GB each,
-   starting at virtual and linear address 0.
+/* User address spaces are 3GB each on a 32-bit kernel, starting at
+   virtual and linear address 0.
+   On a 64-bit kernel we split the address space in half, with the
+   lower 128TB for the user address space and the upper 128TB for the
+   kernel address space.
 
-   VM_MAX_ADDRESS can be reduced to leave more space for the kernel, but must
-   not be increased to more than 3GB as glibc and hurd servers would not cope
-   with that.
+   On a 32-bit kernel VM_MAX_ADDRESS can be reduced to leave more
+   space for the kernel.
    */
-#define VM_MIN_ADDRESS		(0)
+#define VM_MIN_ADDRESS		(0ULL)
+
 #ifdef __x86_64__
-#define VM_MAX_ADDRESS		(0x40000000UL)
-#else
+#if defined(KERNEL) && defined(USER32)
+#define VM_MAX_ADDRESS		(0xfffff000ULL)
+#else /* defined(KERNEL) && defined(USER32) */
+#define VM_MAX_ADDRESS		(0x800000000000ULL)
+#endif /* defined(KERNEL) && defined(USER32) */
+#else /* __x86_64__ */
 #define VM_MAX_ADDRESS		(0xc0000000UL)
-#endif
+#endif /* __x86_64__ */
 
 #endif	/* _MACH_I386_VM_PARAM_H_ */

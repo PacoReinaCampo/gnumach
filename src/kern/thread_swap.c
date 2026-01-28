@@ -55,12 +55,12 @@
 #include <kern/sched_prim.h>
 #include <kern/processor.h>
 #include <kern/thread_swap.h>
-#include <machine/machspl.h>		/* for splsched */
+#include <machine/spl.h>		/* for splsched */
 
 
 
 queue_head_t		swapin_queue;
-decl_simple_lock_data(,	swapper_lock_data)
+def_simple_lock_data(static,	swapper_lock_data)
 
 #define swapper_lock()		simple_lock(&swapper_lock_data)
 #define swapper_unlock()	simple_unlock(&swapper_lock_data)
@@ -156,7 +156,7 @@ kern_return_t thread_doswapin(thread_t thread)
  *	This procedure executes as a kernel thread.  Threads that need to
  *	be swapped in are swapped in by this thread.
  */
-void __attribute__((noreturn)) swapin_thread_continue(void)
+static void __attribute__((noreturn)) swapin_thread_continue(void)
 {
 	for (;;) {
 		thread_t thread;
@@ -193,6 +193,7 @@ void __attribute__((noreturn)) swapin_thread_continue(void)
 
 void swapin_thread(void)
 {
+	current_thread()->vm_privilege = 1;
 	stack_privilege(current_thread());
 
 	swapin_thread_continue();

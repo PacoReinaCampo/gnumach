@@ -43,17 +43,6 @@ AC_DEFINE_UNQUOTED([NLPR], [$nlpr], [NLPR])
 # Used in `kern/bootstrap.c'.
 AC_DEFINE([BOOTSTRAP_SYMBOLS], [0], [BOOTSTRAP_SYMBOLS])
 
-# Multiprocessor support is still broken.
-AH_TEMPLATE([MULTIPROCESSOR], [set things up for a uniprocessor])
-AC_ARG_ENABLE([ncpus],
-  AS_HELP_STRING([--enable-ncpus=N], [specify the maximum number of cpus to be supported]),
-  [mach_ncpus=$enable_ncpus],
-  [mach_ncpus=1])
-AC_DEFINE_UNQUOTED([NCPUS], [$mach_ncpus], [number of CPUs])
-[if [ $mach_ncpus -gt 1 ]; then]
-  AC_DEFINE([MULTIPROCESSOR], [1], [set things up for a multiprocessor])
-[fi]
-
 # Restartable Atomic Sequences to get a really fast test-n-set.  Can't be
 # enabled, as the `void recover_ras()' function is missing.
 AC_DEFINE([FAST_TAS], [0], [FAST_TAS])
@@ -70,8 +59,12 @@ AC_DEFINE([MACH_DEBUG], [1], [MACH_DEBUG])
 # Fixed priority threads.
 AC_DEFINE([MACH_FIXPRI], [1], [MACH_FIXPRI])
 
-# Mach host (resource alloc.).
-AC_DEFINE([MACH_HOST], [0], [MACH_HOST])
+# Mach host (cpu resource alloc.).
+[if [ $mach_ncpus -gt 1 ]; then]
+  AC_DEFINE([MACH_HOST], [1], [MACH_HOST])
+[else]
+  AC_DEFINE([MACH_HOST], [0], [MACH_HOST])
+[fi]
 
 # IPC debugging calls.
 AC_DEFINE([MACH_IPC_DEBUG], [1], [MACH_IPC_DEBUG])
@@ -99,7 +92,12 @@ AC_DEFINE([MACH_MP_DEBUG], [0], [MACH_MP_DEBUG])
 AC_DEFINE([MACH_PAGEMAP], [1], [MACH_PAGEMAP])
 
 # Do pc sample histogram.
-AC_DEFINE([MACH_PCSAMPLE], [1], [MACH_PCSAMPLE])
+[if [ $mach_ncpus -gt 1 ]; then]
+  # Apparently not MP-safe yet.
+  AC_DEFINE([MACH_PCSAMPLE], [0], [MACH_PCSAMPLE])
+[else]
+  AC_DEFINE([MACH_PCSAMPLE], [1], [MACH_PCSAMPLE])
+[fi]
 
 # Sample kernel too.
 AC_ARG_ENABLE([kernsample],

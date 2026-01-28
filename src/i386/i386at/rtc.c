@@ -47,9 +47,9 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 */
 
 #include <sys/types.h>
-#include <sys/time.h>
 #include <kern/mach_clock.h>
-#include <i386/machspl.h>
+#include <kern/printf.h>
+#include <i386/spl.h>
 #include <i386/pio.h>
 #include <i386at/rtc.h>
 
@@ -59,7 +59,7 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 static boolean_t first_rtcopen_ever = TRUE;
 
-void
+static void
 rtcinit(void)
 {
 	outb(RTC_ADDR, RTC_A);
@@ -69,7 +69,7 @@ rtcinit(void)
 }
 
 
-int
+static int
 rtcget(struct rtc_st *st)
 {
 	unsigned char *regs = (unsigned char *)st;
@@ -86,7 +86,7 @@ rtcget(struct rtc_st *st)
 	return(0);
 }
 
-void
+static void
 rtcput(struct rtc_st *st)
 {
 	unsigned char *regs = (unsigned char *)st;
@@ -106,11 +106,9 @@ rtcput(struct rtc_st *st)
 }
 
 
-extern struct timeval time;
-
 static int month[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
 
-int
+static int
 yeartoday(int year)
 {
 	if (year%4)
@@ -133,13 +131,13 @@ yeartoday(int year)
 	return 366;
 }
 
-int
+static int
 hexdectodec(char n)
 {
 	return(((n>>4)&0x0F)*10 + (n&0x0F));
 }
 
-char
+static char
 dectohexdec(int n)
 {
 	return((char)(((n/10)<<4)&0xF0) | ((n%10)&0x0F));
@@ -170,6 +168,12 @@ readtodc(uint64_t *tp)
 	yr = (yr < CENTURY_START%100) ?
 		yr+CENTURY_START-CENTURY_START%100+100 :
 		yr+CENTURY_START-CENTURY_START%100;
+
+	if (yr >= CENTURY_START+90) {
+		printf("FIXME: we are approaching %u, update CENTURY_START\n", CENTURY_START);
+	}
+
+	printf("RTC time is %04u-%02u-%02u %02u:%02u:%02u\n", yr, mon, dom, hr, min, sec);
 
 	n = sec + 60 * min + 3600 * hr;
 	n += (dom - 1) * 3600 * 24;
@@ -206,20 +210,20 @@ writetodc(void)
 	splx(ospl);
 
 	diff = 0;
-	n = (time.tv_sec - diff) % (3600 * 24);   /* hrs+mins+secs */
+	n = (time.seconds - diff) % (3600 * 24);   /* hrs+mins+secs */
 	rtclk.rtc_sec = dectohexdec(n%60);
 	n /= 60;
 	rtclk.rtc_min = dectohexdec(n%60);
 	rtclk.rtc_hr = dectohexdec(n/60);
 
-	n = (time.tv_sec - diff) / (3600 * 24);	/* days */
+	n = (time.seconds - diff) / (3600 * 24);	/* days */
 	rtclk.rtc_dow = (n + 4) % 7;  /* 1/1/70 is Thursday */
 
 	/* Epoch shall be 1970 January 1st */
 	for (j = 1970, i = yeartoday(j); n >= i; j++, i = yeartoday(j))
 		n -= i;
 
-	rtclk.rtc_yr = dectohexdec(j - 1900);
+	rtclk.rtc_yr = dectohexdec(j % 100);
 
 	if (i == 366)
 		month[1] = 29;

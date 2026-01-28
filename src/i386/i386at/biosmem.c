@@ -83,6 +83,19 @@ static unsigned int biosmem_nr_boot_data __bootdata;
 #define BIOSMEM_TYPE_DISABLED   6
 
 /*
+ * Bitmask corresponding to memory ranges that require narrowing
+ * to page boundaries.
+ */
+#define BIOSMEM_MASK_NARROW    (((1u << BIOSMEM_TYPE_AVAILABLE) | \
+                                 (1u << BIOSMEM_TYPE_NVS) | \
+                                 (1u << BIOSMEM_TYPE_DISABLED)))
+
+/*
+ * Helper macro to test if range type needs narrowing.
+ */
+#define BIOSMEM_NEEDS_NARROW(t)	((1u << t) & BIOSMEM_MASK_NARROW)
+
+/*
  * Memory map entry.
  */
 struct biosmem_map_entry {
@@ -249,6 +262,17 @@ biosmem_unregister_boot_data(phys_addr_t start, phys_addr_t end)
 #ifndef MACH_HYP
 
 static void __boot
+biosmem_map_adjust_alignment(struct biosmem_map_entry *e)
+{
+    uint64_t end = e->base_addr + e->length;
+
+    if (BIOSMEM_NEEDS_NARROW(e->type)) {
+        e->base_addr = vm_page_round (e->base_addr);
+        e->length = vm_page_trunc (end) - e->base_addr;
+    }
+}
+
+static void __boot
 biosmem_map_build(const struct multiboot_raw_info *mbi)
 {
     struct multiboot_raw_mmap_entry *mb_entry, *mb_end;
@@ -268,6 +292,8 @@ biosmem_map_build(const struct multiboot_raw_info *mbi)
         entry->type = mb_entry->type;
 
         mb_entry = (void *)mb_entry + sizeof(mb_entry->size) + mb_entry->size;
+
+        biosmem_map_adjust_alignment(entry);
         entry++;
     }
 
@@ -283,11 +309,13 @@ biosmem_map_build_simple(const struct multiboot_raw_info *mbi)
     entry->base_addr = 0;
     entry->length = mbi->mem_lower << 10;
     entry->type = BIOSMEM_TYPE_AVAILABLE;
+    biosmem_map_adjust_alignment(entry);
 
     entry++;
     entry->base_addr = BIOSMEM_END;
     entry->length = mbi->mem_upper << 10;
     entry->type = BIOSMEM_TYPE_AVAILABLE;
+    biosmem_map_adjust_alignment(entry);
 
     biosmem_map_size = 2;
 }
@@ -609,10 +637,8 @@ biosmem_setup_allocator(const struct multiboot_raw_info *mbi)
      */
     end = vm_page_trunc((mbi->mem_upper + 1024) << 10);
 
-#ifndef __LP64__
     if (end > VM_PAGE_DIRECTMAP_LIMIT)
         end = VM_PAGE_DIRECTMAP_LIMIT;
-#endif /* __LP64__ */
 
     max_heap_start = 0;
     max_heap_end = 0;
@@ -663,10 +689,21 @@ biosmem_bootstrap_common(void)
     if (error)
         boot_panic(biosmem_panic_noseg_msg);
 
+#if !defined(MACH_HYP) && NCPUS > 1
+    /*
+     * Grab an early page for AP boot code which needs to be below 1MB.
+     */
+    assert (phys_start < 0x100000);
+    apboot_addr = phys_start;
+    phys_start += PAGE_SIZE;
+#endif
+
     biosmem_set_segment(VM_PAGE_SEG_DMA, phys_start, phys_end);
 
     phys_start = VM_PAGE_DMA_LIMIT;
+
 #ifdef VM_PAGE_DMA32_LIMIT
+#if VM_PAGE_DMA32_LIMIT < VM_PAGE_DIRECTMAP_LIMIT
     phys_end = VM_PAGE_DMA32_LIMIT;
     error = biosmem_map_find_avail(&phys_start, &phys_end);
 
@@ -676,7 +713,9 @@ biosmem_bootstrap_common(void)
     biosmem_set_segment(VM_PAGE_SEG_DMA32, phys_start, phys_end);
 
     phys_start = VM_PAGE_DMA32_LIMIT;
+#endif
 #endif /* VM_PAGE_DMA32_LIMIT */
+
     phys_end = VM_PAGE_DIRECTMAP_LIMIT;
     error = biosmem_map_find_avail(&phys_start, &phys_end);
 
@@ -686,6 +725,21 @@ biosmem_bootstrap_common(void)
     biosmem_set_segment(VM_PAGE_SEG_DIRECTMAP, phys_start, phys_end);
 
     phys_start = VM_PAGE_DIRECTMAP_LIMIT;
+
+#ifdef VM_PAGE_DMA32_LIMIT
+#if VM_PAGE_DMA32_LIMIT > VM_PAGE_DIRECTMAP_LIMIT
+    phys_end = VM_PAGE_DMA32_LIMIT;
+    error = biosmem_map_find_avail(&phys_start, &phys_end);
+
+    if (error)
+        return;
+
+    biosmem_set_segment(VM_PAGE_SEG_DMA32, phys_start, phys_end);
+
+    phys_start = VM_PAGE_DMA32_LIMIT;
+#endif
+#endif /* VM_PAGE_DMA32_LIMIT */
+
     phys_end = VM_PAGE_HIGHMEM_LIMIT;
     error = biosmem_map_find_avail(&phys_start, &phys_end);
 
@@ -795,10 +849,11 @@ biosmem_directmap_end(void)
 {
     if (biosmem_segment_size(VM_PAGE_SEG_DIRECTMAP) != 0)
         return biosmem_segment_end(VM_PAGE_SEG_DIRECTMAP);
-    else if (biosmem_segment_size(VM_PAGE_SEG_DMA32) != 0)
+#if defined(VM_PAGE_DMA32_LIMIT) && (VM_PAGE_DMA32_LIMIT < VM_PAGE_DIRECTMAP_LIMIT)
+    if (biosmem_segment_size(VM_PAGE_SEG_DMA32) != 0)
         return biosmem_segment_end(VM_PAGE_SEG_DMA32);
-    else
-        return biosmem_segment_end(VM_PAGE_SEG_DMA);
+#endif
+    return biosmem_segment_end(VM_PAGE_SEG_DMA);
 }
 
 static const char * __init
@@ -908,9 +963,9 @@ static void __init
 biosmem_unregister_temporary_boot_data(void)
 {
     struct biosmem_boot_data *data;
-    unsigned int i;
+    int i;
 
-    for (i = 0; i < biosmem_nr_boot_data; i++) {
+    for (i = 0; i < (int) biosmem_nr_boot_data; i++) {
         data = &biosmem_boot_data_array[i];
 
         if (!data->temporary) {
@@ -918,7 +973,7 @@ biosmem_unregister_temporary_boot_data(void)
         }
 
         biosmem_unregister_boot_data(data->start, data->end);
-        i = (unsigned int)-1;
+        i = -1;
     }
 }
 
@@ -994,4 +1049,22 @@ biosmem_free_usable(void)
 
         biosmem_free_usable_entry(start, end);
     }
+}
+
+boolean_t
+biosmem_addr_available(phys_addr_t addr)
+{
+    struct biosmem_map_entry *entry;
+    unsigned i;
+
+    if (addr < BIOSMEM_BASE)
+        return FALSE;
+
+    for (i = 0; i < biosmem_map_size; i++) {
+        entry = &biosmem_map[i];
+
+        if (addr >= entry->base_addr && addr < entry->base_addr + entry->length)
+            return entry->type == BIOSMEM_TYPE_AVAILABLE;
+    }
+    return FALSE;
 }

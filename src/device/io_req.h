@@ -38,6 +38,7 @@
 #include <kern/slab.h>
 #include <kern/kalloc.h>
 #include <kern/lock.h>
+#include <vm/vm_map.h>
 #include <vm/vm_page.h>
 #include <device/device_types.h>
 #include <device/dev_hdr.h>
@@ -95,6 +96,8 @@ struct io_req {
  * locking is needed in this sequence.  Unfortunately, a synchronous wait
  * for a buffer requires a lock to avoid problems if the wait and interrupt
  * happen simultaneously on different processors.
+ *
+ * Shall be taken at splio only
  */
 
 #define ior_lock(ior)	simple_lock(&(ior)->io_req_lock)

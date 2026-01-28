@@ -32,6 +32,7 @@
 #define	_I386_SEG_H_
 
 #include <mach/inline.h>
+#include <mach/machine/vm_types.h>
 
 /*
  * i386 segmentation.
@@ -58,6 +59,9 @@ struct real_descriptor {
 			granularity:4,	/* granularity */
 			base_high:8;	/* base 24..31 */
 };
+typedef struct real_descriptor real_descriptor_t;
+typedef real_descriptor_t *real_descriptor_list_t;
+typedef const real_descriptor_list_t const_real_descriptor_list_t;
 
 #ifdef __x86_64__
 struct real_descriptor64 {
@@ -156,15 +160,15 @@ struct pseudo_descriptor
 
 
 /* Load the processor's IDT, GDT, or LDT pointers.  */
-MACH_INLINE void lgdt(struct pseudo_descriptor *pdesc)
+static inline void lgdt(struct pseudo_descriptor *pdesc)
 {
 	__asm volatile("lgdt %0" : : "m" (*pdesc));
 }
-MACH_INLINE void lidt(struct pseudo_descriptor *pdesc)
+static inline void lidt(struct pseudo_descriptor *pdesc)
 {
 	__asm volatile("lidt %0" : : "m" (*pdesc));
 }
-MACH_INLINE void lldt(unsigned short ldt_selector)
+static inline void lldt(unsigned short ldt_selector)
 {
 	__asm volatile("lldt %w0" : : "r" (ldt_selector) : "memory");
 }
@@ -177,8 +181,8 @@ MACH_INLINE void lldt(unsigned short ldt_selector)
 
 
 /* Fill a segment descriptor.  */
-MACH_INLINE void
-fill_descriptor(struct real_descriptor *_desc, unsigned base, unsigned limit,
+static inline void
+fill_descriptor(struct real_descriptor *_desc, vm_offset_t base, vm_offset_t limit,
 		unsigned char access, unsigned char sizebits)
 {
 	/* TODO: when !MACH_PV_DESCRIPTORS, setting desc and just memcpy isn't simpler actually */
@@ -201,12 +205,12 @@ fill_descriptor(struct real_descriptor *_desc, unsigned base, unsigned limit,
 	desc->base_high = base >> 24;
 #ifdef	MACH_PV_DESCRIPTORS
 	if (hyp_do_update_descriptor(kv_to_ma(_desc), *(uint64_t*)desc))
-		panic("couldn't update descriptor(%lu to %08lx%08lx)\n", (vm_offset_t) kv_to_ma(_desc), *(((unsigned long*)desc)+1), *(unsigned long *)desc);
+		panic("couldn't update descriptor(%zu to %08lx%08lx)\n", (vm_offset_t) kv_to_ma(_desc), *(((unsigned long*)desc)+1), *(unsigned long *)desc);
 #endif	/* MACH_PV_DESCRIPTORS */
 }
 
 #ifdef __x86_64__
-MACH_INLINE void
+static inline void
 fill_descriptor64(struct real_descriptor64 *_desc, unsigned long base, unsigned limit,
 		  unsigned char access, unsigned char sizebits)
 {
@@ -240,7 +244,7 @@ fill_descriptor64(struct real_descriptor64 *_desc, unsigned long base, unsigned 
 #endif
 
 /* Fill a gate with particular values.  */
-MACH_INLINE void
+static inline void
 fill_gate(struct real_gate *gate, unsigned long offset, unsigned short selector,
 	  unsigned char access, unsigned char word_count)
 {

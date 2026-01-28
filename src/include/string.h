@@ -42,8 +42,6 @@ extern char *strcpy (char *dest, const char *src);
 
 extern char *strncpy (char *dest, const char *src, size_t n);
 
-extern char *strrchr (const char *s, int c);
-
 extern char *strsep (char **strp, const char *delim);
 
 extern int strcmp (const char *s1, const char *s2) __attribute__ ((pure));

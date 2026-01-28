@@ -33,6 +33,7 @@
 #include <machine/db_machdep.h>
 
 #include <ddb/db_access.h>
+#include <ddb/db_examine.h>
 #include <ddb/db_output.h>
 #include <ddb/db_sym.h>
 
@@ -162,7 +163,7 @@ struct inst db_inst_0f0x[] = {
 /*08*/	{ "invd",  FALSE, NONE,  0,	      0 },
 /*09*/	{ "wbinvd",FALSE, NONE,  0,	      0 },
 /*0a*/	{ "",      FALSE, NONE,  0,	      0 },
-/*0b*/	{ "",      FALSE, NONE,  0,	      0 },
+/*0b*/	{ "ud2",   FALSE, NONE,  0,	      0 },
 /*0c*/	{ "",      FALSE, NONE,  0,	      0 },
 /*0d*/	{ "",      FALSE, NONE,  0,	      0 },
 /*0e*/	{ "",      FALSE, NONE,  0,	      0 },
@@ -856,13 +857,15 @@ int db_lengths[] = {
 };
 
 #define	get_value_inc(result, loc, size, is_signed, task) \
+MACRO_BEGIN \
 	result = db_get_task_value((loc), (size), (is_signed), (task)); \
-	(loc) += (size);
+	(loc) += (size); \
+MACRO_END
 
 /*
  * Read address at location and return updated location.
  */
-db_addr_t
+static db_addr_t
 db_read_address(
 	db_addr_t	loc,
 	int		short_addr,
@@ -948,7 +951,7 @@ db_read_address(
 	return loc;
 }
 
-void
+static void
 db_print_address(
 	const char *		seg,
 	int			size,
@@ -980,7 +983,7 @@ db_print_address(
  * Disassemble floating-point ("escape") instruction
  * and return updated location.
  */
-db_addr_t
+static db_addr_t
 db_disasm_esc(
 	db_addr_t	loc,
 	int		inst,
@@ -1089,6 +1092,12 @@ db_disasm(
 	int	imm2;
 	int	len;
 	struct i_addr	address;
+
+#ifdef __x86_64__
+	/* The instruction set decoding needs an update, avoid showing bogus output.  */
+	db_printf("TODO\n");
+	return loc+1;
+#endif
 
 	get_value_inc(inst, loc, 1, FALSE, task);
 	if (db_disasm_16) {

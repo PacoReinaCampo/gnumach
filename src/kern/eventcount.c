@@ -49,7 +49,7 @@
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
 
-#include <machine/machspl.h>	/* For def'n of splsched() */
+#include <machine/spl.h>	/* For def'n of splsched() */
 
 #include <kern/eventcount.h>
 
@@ -244,7 +244,7 @@ evc_signal(evc_t ev)
 #if (NCPUS > 1)
       retry:
 	while((thread->state & TH_RUN) || thread->lock.lock_data)
-		;
+		cpu_pause();
 #endif
 	thread_lock(thread);
 
@@ -260,12 +260,12 @@ evc_signal(evc_t ev)
 		 *	on run queue.
 		 */
 		thread->state = (state &~ TH_WAIT) | TH_RUN;
-		thread_unlock(thread);
 #if NCPUS > 1
 		thread_setrun(thread, TRUE);
 #else
 		simpler_thread_setrun(thread, TRUE);
 #endif
+		thread_unlock(thread);
 		break;
 
 	    case TH_RUN | TH_WAIT:
@@ -339,7 +339,7 @@ simpler_thread_setrun(
 	ast_on(cpu_number(), AST_BLOCK);
 
 	whichq = (th)->sched_pri;
-	simple_lock(&(rq)->lock);	/* lock the run queue */
+	runq_lock(rq);	/* lock the run queue */
 	enqueue_head(&(rq)->runq[whichq], &((th)->links));
 
 	if (whichq < (rq)->low || (rq)->count == 0)
@@ -350,7 +350,7 @@ simpler_thread_setrun(
 #else
 	(th)->runq = (rq);
 #endif
-	simple_unlock(&(rq)->lock);
+	runq_unlock(rq);
 
 	/*
 	 *	Turn off first_quantum to allow context switch.

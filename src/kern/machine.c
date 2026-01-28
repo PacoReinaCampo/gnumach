@@ -44,14 +44,18 @@
 #include <kern/debug.h>
 #include <kern/ipc_host.h>
 #include <kern/host.h>
+#include <kern/machine.h>
+#include <kern/mach_host.server.h>
 #include <kern/lock.h>
 #include <kern/processor.h>
 #include <kern/queue.h>
 #include <kern/sched.h>
 #include <kern/task.h>
 #include <kern/thread.h>
-#include <machine/machspl.h>	/* for splsched */
+#include <kern/printf.h>
+#include <machine/spl.h>	/* for splsched */
 #include <machine/model_dep.h>
+#include <machine/pcb.h>
 #include <sys/reboot.h>
 
 
@@ -64,7 +68,7 @@ struct machine_info	machine_info;
 struct machine_slot	machine_slot[NCPUS];
 
 queue_head_t	action_queue;	/* assign/shutdown queue */
-decl_simple_lock_data(,action_lock);
+def_simple_lock_data(,action_lock);
 
 /*
  *	cpu_up:
@@ -80,6 +84,9 @@ void cpu_up(int cpu)
 
 	processor = cpu_to_processor(cpu);
 	pset_lock(&default_pset);
+#if	MACH_HOST
+	pset_lock(slave_pset);
+#endif
 	s = splsched();
 	processor_lock(processor);
 #if	NCPUS > 1
@@ -88,12 +95,41 @@ void cpu_up(int cpu)
 	ms = &machine_slot[cpu];
 	ms->running = TRUE;
 	machine_info.avail_cpus++;
-	pset_add_processor(&default_pset, processor);
+#if	MACH_HOST
+	if (cpu != 0)
+		pset_add_processor(slave_pset, processor);
+	else
+#endif
+		pset_add_processor(&default_pset, processor);
 	processor->state = PROCESSOR_RUNNING;
 	processor_unlock(processor);
 	splx(s);
+#if	MACH_HOST
+	pset_unlock(slave_pset);
+#endif
 	pset_unlock(&default_pset);
 }
+
+kern_return_t
+host_reboot(const host_t host, int options)
+{
+	if (host == HOST_NULL)
+		return (KERN_INVALID_HOST);
+
+	if (options & RB_DEBUGGER) {
+		Debugger("Debugger");
+	} else {
+#ifdef parisc
+/* XXX this could be made common */
+		halt_all_cpus(options);
+#else
+		halt_all_cpus(!(options & RB_HALT));
+#endif
+	}
+	return (KERN_SUCCESS);
+}
+
+#if	NCPUS > 1
 
 /*
  *	cpu_down:
@@ -101,7 +137,7 @@ void cpu_up(int cpu)
  *	Flag specified cpu as down.  Called when a processor is about to
  *	go offline.
  */
-void cpu_down(int cpu)
+static void cpu_down(int cpu)
 {
 	struct machine_slot	*ms;
 	processor_t		processor;
@@ -122,35 +158,13 @@ void cpu_down(int cpu)
 	splx(s);
 }
 
-kern_return_t
-host_reboot(host, options)
-	const host_t	host;
-	int		options;
-{
-	if (host == HOST_NULL)
-		return (KERN_INVALID_HOST);
-
-	if (options & RB_DEBUGGER) {
-		Debugger("Debugger");
-	} else {
-#ifdef parisc
-/* XXX this could be made common */
-		halt_all_cpus(options);
-#else
-		halt_all_cpus(!(options & RB_HALT));
-#endif
-	}
-	return (KERN_SUCCESS);
-}
-
-#if	NCPUS > 1
 /*
  *	processor_request_action - common internals of processor_assign
  *		and processor_shutdown.  If new_pset is null, this is
  *		a shutdown, else it's an assign and caller must donate
  *		a reference.
  */
-void
+static void
 processor_request_action(
 	processor_t	processor,
 	processor_set_t	new_pset)
@@ -162,14 +176,14 @@ processor_request_action(
      *	get at processor state.
      */
     pset = processor->processor_set;
-    simple_lock(&pset->idle_lock);
+    pset_idle_lock();
 
     /*
      *	If the processor is dispatching, let it finish - it will set its
      *	state to running very soon.
      */
     while (*(volatile int *)&processor->state == PROCESSOR_DISPATCHING)
-    	continue;
+	cpu_pause();
 
     /*
      *	Now lock the action queue and do the dirty work.
@@ -214,7 +228,7 @@ processor_request_action(
 	    panic("processor_request_action: bad state");
     }
     simple_unlock(&action_lock);
-    simple_unlock(&pset->idle_lock);
+    pset_idle_unlock();
 
     thread_wakeup((event_t)&action_queue);
 }
@@ -356,49 +370,11 @@ processor_shutdown(processor_t processor)
 }
 
 /*
- *	action_thread() shuts down processors or changes their assignment.
- */
-void action_thread_continue(void)
-{
-	processor_t	processor;
-	spl_t		s;
-
-	while (TRUE) {
-		s = splsched();
-		simple_lock(&action_lock);
-		while ( !queue_empty(&action_queue)) {
-			processor = (processor_t) queue_first(&action_queue);
-			queue_remove(&action_queue, processor, processor_t,
-				     processor_queue);
-			simple_unlock(&action_lock);
-			(void) splx(s);
-
-			processor_doaction(processor);
-
-			s = splsched();
-			simple_lock(&action_lock);
-		}
-
-		assert_wait((event_t) &action_queue, FALSE);
-		simple_unlock(&action_lock);
-		(void) splx(s);
-		counter(c_action_thread_block++);
-		thread_block(action_thread_continue);
-	}
-}
-
-void __attribute__((noreturn)) action_thread(void)
-{
-	action_thread_continue();
-	/*NOTREACHED*/
-}
-
-/*
  *	processor_doaction actually does the shutdown.  The trick here
  *	is to schedule ourselves onto a cpu and then save our
  *	context back into the runqs before taking out the cpu.
  */
-void processor_doaction(processor_t processor)
+static void processor_doaction(processor_t processor)
 {
 	thread_t			this_thread;
 	spl_t				s;
@@ -589,7 +565,9 @@ Restart_pset:
 	s = splsched();
 	processor_lock(processor);
 
+#if	MACH_HOST
     shutdown:
+#endif	/* MACH_HOST */
 	pset_remove_processor(pset, processor);
 	processor_unlock(processor);
 	pset_unlock(pset);
@@ -615,12 +593,49 @@ Restart_pset:
 }
 
 /*
+ *	action_thread() shuts down processors or changes their assignment.
+ */
+void __attribute__((noreturn)) action_thread_continue(void)
+{
+	processor_t	processor;
+	spl_t		s;
+
+	while (TRUE) {
+		s = splsched();
+		simple_lock(&action_lock);
+		while ( !queue_empty(&action_queue)) {
+			processor = (processor_t) queue_first(&action_queue);
+			queue_remove(&action_queue, processor, processor_t,
+				     processor_queue);
+			simple_unlock(&action_lock);
+			(void) splx(s);
+
+			processor_doaction(processor);
+
+			s = splsched();
+			simple_lock(&action_lock);
+		}
+
+		assert_wait((event_t) &action_queue, FALSE);
+		simple_unlock(&action_lock);
+		(void) splx(s);
+		counter(c_action_thread_block++);
+		thread_block(action_thread_continue);
+	}
+}
+
+void __attribute__((noreturn)) action_thread(void)
+{
+	action_thread_continue();
+	/*NOTREACHED*/
+}
+
+/*
  *	Actually do the processor shutdown.  This is called at splsched,
  *	running on the processor's shutdown stack.
  */
 
-void processor_doshutdown(processor)
-processor_t	processor;
+void processor_doshutdown(processor_t processor)
 {
 	int		cpu = processor->slot_num;
 
@@ -631,7 +646,7 @@ processor_t	processor;
 	 */
 	PMAP_DEACTIVATE_KERNEL(cpu);
 #ifndef MIGRATING_THREADS
-	active_threads[cpu] = THREAD_NULL;
+	percpu_array[cpu].active_thread = THREAD_NULL;
 #endif
 	cpu_down(cpu);
 	thread_wakeup((event_t)processor);
@@ -655,18 +670,3 @@ processor_assign(
 }
 
 #endif /* NCPUS > 1 */
-
-kern_return_t
-host_get_boot_info(
-        host_t              priv_host,
-        kernel_boot_info_t  boot_info)
-{
-	char *src = "";
-
-	if (priv_host == HOST_NULL) {
-		return KERN_INVALID_HOST;
-	}
-
-	(void) strncpy(boot_info, src, KERNEL_BOOT_INFO_MAX);
-	return KERN_SUCCESS;
-}

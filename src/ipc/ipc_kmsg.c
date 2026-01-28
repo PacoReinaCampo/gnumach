@@ -43,12 +43,14 @@
 #include <mach/port.h>
 #include <machine/locore.h>
 #include <kern/assert.h>
+#include <kern/debug.h>
 #include <kern/kalloc.h>
 #include <vm/vm_map.h>
 #include <vm/vm_object.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_user.h>
 #include <ipc/port.h>
+#include <ipc/copy_user.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_thread.h>
@@ -68,9 +70,6 @@
 #include <ipc/ipc_print.h>
 #endif
 
-#define is_misaligned(x)	( ((vm_offset_t)(x)) & (sizeof(vm_offset_t)-1) )
-#define ptr_align(x)	\
-	( ( ((vm_offset_t)(x)) + (sizeof(vm_offset_t)-1) ) & ~(sizeof(vm_offset_t)-1) )
 
 ipc_kmsg_t ipc_kmsg_cache[NCPUS];
 
@@ -214,7 +213,7 @@ ipc_kmsg_destroy(
  *		No locks held.
  */
 
-void
+static void
 ipc_kmsg_clean_body(
 	vm_offset_t saddr,
 	vm_offset_t eaddr)
@@ -230,27 +229,22 @@ ipc_kmsg_clean_body(
 		type = (mach_msg_type_long_t *) saddr;
 		is_inline = ((mach_msg_type_t*)type)->msgt_inline;
 		if (((mach_msg_type_t*)type)->msgt_longform) {
-			/* This must be aligned */
-			if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-			    (is_misaligned(type))) {
-				saddr = ptr_align(saddr);
-				continue;
-			}
 			name = type->msgtl_name;
 			size = type->msgtl_size;
 			number = type->msgtl_number;
 			saddr += sizeof(mach_msg_type_long_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_long_t))) {
+				saddr = mach_msg_kernel_align(saddr);
+			}
 		} else {
 			name = ((mach_msg_type_t*)type)->msgt_name;
 			size = ((mach_msg_type_t*)type)->msgt_size;
 			number = ((mach_msg_type_t*)type)->msgt_number;
 			saddr += sizeof(mach_msg_type_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_t))) {
+				saddr = mach_msg_kernel_align(saddr);
+			}
 		}
-
-		/* padding (ptrs and ports) ? */
-		if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-		    ((size >> 3) == sizeof(natural_t)))
-			saddr = ptr_align(saddr);
 
 		/* calculate length of data in bytes, rounding up */
 
@@ -284,9 +278,7 @@ ipc_kmsg_clean_body(
 		}
 
 		if (is_inline) {
-			/* inline data sizes round up to int boundaries */
-
-			saddr += (length + 3) &~ 3;
+			saddr += length;
 		} else {
 			vm_offset_t data = * (vm_offset_t *) saddr;
 
@@ -301,6 +293,7 @@ ipc_kmsg_clean_body(
 
 			saddr += sizeof(vm_offset_t);
 		}
+		saddr = mach_msg_kernel_align(saddr);
 	}
 }
 
@@ -356,7 +349,7 @@ ipc_kmsg_clean(ipc_kmsg_t kmsg)
  *		Nothing locked.
  */
 
-void
+static void
 ipc_kmsg_clean_partial(
 	ipc_kmsg_t 		kmsg,
 	vm_offset_t 		eaddr,
@@ -388,30 +381,25 @@ ipc_kmsg_clean_partial(
 		boolean_t is_inline, is_port;
 		vm_size_t length;
 
-xxx:		type = (mach_msg_type_long_t *) eaddr;
+		type = (mach_msg_type_long_t *) eaddr;
 		is_inline = ((mach_msg_type_t*)type)->msgt_inline;
 		if (((mach_msg_type_t*)type)->msgt_longform) {
-			/* This must be aligned */
-			if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-			    (is_misaligned(type))) {
-				eaddr = ptr_align(eaddr);
-				goto xxx;
-			}
 			name = type->msgtl_name;
 			size = type->msgtl_size;
 			rnumber = type->msgtl_number;
 			eaddr += sizeof(mach_msg_type_long_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_long_t))) {
+				eaddr = mach_msg_kernel_align(eaddr);
+			}
 		} else {
 			name = ((mach_msg_type_t*)type)->msgt_name;
 			size = ((mach_msg_type_t*)type)->msgt_size;
 			rnumber = ((mach_msg_type_t*)type)->msgt_number;
 			eaddr += sizeof(mach_msg_type_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_t))) {
+				eaddr = mach_msg_kernel_align(eaddr);
+			}
 		}
-
-		/* padding (ptrs and ports) ? */
-		if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-		    ((size >> 3) == sizeof(natural_t)))
-			eaddr = ptr_align(eaddr);
 
 		/* calculate length of data in bytes, rounding up */
 
@@ -496,39 +484,32 @@ ipc_kmsg_free(ipc_kmsg_t kmsg)
 
 mach_msg_return_t
 ipc_kmsg_get(
-	mach_msg_header_t 	*msg,
+	mach_msg_user_header_t 	*msg,
 	mach_msg_size_t 	size,
 	ipc_kmsg_t 		*kmsgp)
 {
 	ipc_kmsg_t kmsg;
+	mach_msg_size_t 	ksize = size * IKM_EXPAND_FACTOR;
 
-	if ((size < sizeof(mach_msg_header_t)) || (size & 3))
+	if ((size < sizeof(mach_msg_user_header_t)) || mach_msg_user_is_misaligned(size))
 		return MACH_SEND_MSG_TOO_SMALL;
 
-	if (size <= IKM_SAVED_MSG_SIZE) {
-		kmsg = ikm_cache();
-		if (kmsg != IKM_NULL) {
-			ikm_cache() = IKM_NULL;
-			ikm_check_initialized(kmsg, IKM_SAVED_KMSG_SIZE);
-		} else {
-			kmsg = ikm_alloc(IKM_SAVED_MSG_SIZE);
-			if (kmsg == IKM_NULL)
-				return MACH_SEND_NO_BUFFER;
-			ikm_init(kmsg, IKM_SAVED_MSG_SIZE);
-		}
-	} else {
-		kmsg = ikm_alloc(size);
+	if (ksize <= IKM_SAVED_MSG_SIZE) {
+		kmsg = ikm_cache_alloc();
 		if (kmsg == IKM_NULL)
 			return MACH_SEND_NO_BUFFER;
-		ikm_init(kmsg, size);
+	} else {
+		kmsg = ikm_alloc(ksize);
+		if (kmsg == IKM_NULL)
+			return MACH_SEND_NO_BUFFER;
+		ikm_init(kmsg, ksize);
 	}
 
-	if (copyinmsg(msg, &kmsg->ikm_header, size)) {
+	if (copyinmsg(msg, &kmsg->ikm_header, size, kmsg->ikm_size)) {
 		ikm_free(kmsg);
 		return MACH_SEND_INVALID_DATA;
 	}
 
-	kmsg->ikm_header.msgh_size = size;
 	*kmsgp = kmsg;
 	return MACH_MSG_SUCCESS;
 }
@@ -555,7 +536,7 @@ ipc_kmsg_get_from_kernel(
 	ipc_kmsg_t kmsg;
 
 	assert(size >= sizeof(mach_msg_header_t));
-	assert((size & 3) == 0);
+	assert(!mach_msg_kernel_is_misaligned(size));
 
 	kmsg = ikm_alloc(size);
 	if (kmsg == IKM_NULL)
@@ -585,7 +566,7 @@ ipc_kmsg_get_from_kernel(
 
 mach_msg_return_t
 ipc_kmsg_put(
-	mach_msg_header_t 	*msg,
+	mach_msg_user_header_t 	*msg,
 	ipc_kmsg_t 		kmsg,
 	mach_msg_size_t 	size)
 {
@@ -598,11 +579,7 @@ ipc_kmsg_put(
 	else
 		mr = MACH_MSG_SUCCESS;
 
-	if ((kmsg->ikm_size == IKM_SAVED_KMSG_SIZE) &&
-	    (ikm_cache() == IKM_NULL))
-		ikm_cache() = kmsg;
-	else
-		ikm_free(kmsg);
+	ikm_cache_free(kmsg);
 
 	return mr;
 }
@@ -672,11 +649,21 @@ mach_msg_return_t
 ipc_kmsg_copyin_header(
 	mach_msg_header_t 	*msg,
 	ipc_space_t 		space,
-	mach_port_t 		notify)
+	mach_port_name_t 	notify)
 {
 	mach_msg_bits_t mbits = msg->msgh_bits &~ MACH_MSGH_BITS_CIRCULAR;
-	mach_port_t dest_name = msg->msgh_remote_port;
-	mach_port_t reply_name = msg->msgh_local_port;
+	/*
+	 * TODO: For 64 bits, msgh_remote_port as written by user space
+	 * is 4 bytes long but here we assume it is the same size as a pointer.
+	 * When copying the message to the kernel, we need to perform the
+	 * conversion so that port names are parsed correctly.
+	 *
+	 * When copying the message out of the kernel to user space, we also need
+	 * to be careful with the reverse translation.
+	 */
+
+	mach_port_name_t dest_name = (mach_port_name_t)msg->msgh_remote_port;
+	mach_port_name_t reply_name = (mach_port_name_t)msg->msgh_local_port;
 	kern_return_t kr;
 
 #ifndef MIGRATING_THREADS
@@ -699,7 +686,10 @@ ipc_kmsg_copyin_header(
 
 		entry = ipc_entry_lookup (space, dest_name);
 		if (entry == IE_NULL)
+		{
+			ipc_entry_lookup_failed (msg, dest_name);
 			goto abort_async;
+		}
 		bits = entry->ie_bits;
 
 		/* check type bits */
@@ -751,7 +741,10 @@ ipc_kmsg_copyin_header(
 
 		entry = ipc_entry_lookup (space, dest_name);
 		if (entry == IE_NULL)
+		{
+			ipc_entry_lookup_failed (msg, dest_name);
 			goto abort_request;
+		}
 		bits = entry->ie_bits;
 
 		/* check type bits */
@@ -765,7 +758,10 @@ ipc_kmsg_copyin_header(
 
 		entry = ipc_entry_lookup (space, reply_name);
 		if (entry == IE_NULL)
+		{
+			ipc_entry_lookup_failed (msg, reply_name);
 			goto abort_request;
+		}
 		bits = entry->ie_bits;
 
 		/* check type bits */
@@ -832,7 +828,10 @@ ipc_kmsg_copyin_header(
 
 		entry = ipc_entry_lookup (space, dest_name);
 		if (entry == IE_NULL)
+		{
+			ipc_entry_lookup_failed (msg, dest_name);
 			goto abort_reply;
+		}
 		bits = entry->ie_bits;
 
 		/* check and type bits */
@@ -905,6 +904,8 @@ ipc_kmsg_copyin_header(
 
 		if (((entry = ipc_entry_lookup(space, notify)) == IE_NULL) ||
 		    ((entry->ie_bits & MACH_PORT_TYPE_RECEIVE) == 0)) {
+			if (entry == IE_NULL)
+				ipc_entry_lookup_failed (msg, notify);
 			is_write_unlock(space);
 			return MACH_SEND_INVALID_NOTIFY;
 		}
@@ -914,7 +915,7 @@ ipc_kmsg_copyin_header(
 
 	if (dest_name == reply_name) {
 		ipc_entry_t entry;
-		mach_port_t name = dest_name;
+		mach_port_name_t name = dest_name;
 
 		/*
 		 *	Destination and reply ports are the same!
@@ -929,8 +930,10 @@ ipc_kmsg_copyin_header(
 		 */
 
 		entry = ipc_entry_lookup(space, name);
-		if (entry == IE_NULL)
+		if (entry == IE_NULL) {
+			ipc_entry_lookup_failed (msg, name);
 			goto invalid_dest;
+		}
 
 		assert(reply_type != 0); /* because name not null */
 
@@ -1071,7 +1074,7 @@ ipc_kmsg_copyin_header(
 				reply_soright = soright;
 			}
 		}
-	} else if (!MACH_PORT_VALID(reply_name)) {
+	} else if (!MACH_PORT_NAME_VALID(reply_name)) {
 		ipc_entry_t entry;
 
 		/*
@@ -1080,8 +1083,10 @@ ipc_kmsg_copyin_header(
 		 */
 
 		entry = ipc_entry_lookup(space, dest_name);
-		if (entry == IE_NULL)
+		if (entry == IE_NULL) {
+			ipc_entry_lookup_failed (msg, dest_name);
 			goto invalid_dest;
+		}
 
 		kr = ipc_right_copyin(space, dest_name, entry,
 				      dest_type, FALSE,
@@ -1094,7 +1099,7 @@ ipc_kmsg_copyin_header(
 		if (IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE)
 			ipc_entry_dealloc(space, dest_name, entry);
 
-		reply_port = (ipc_object_t) reply_name;
+		reply_port = (ipc_object_t) invalid_name_to_port(reply_name);
 		reply_soright = IP_NULL;
 	} else {
 		ipc_entry_t dest_entry, reply_entry;
@@ -1136,12 +1141,17 @@ ipc_kmsg_copyin_header(
 		 */
 
 		dest_entry = ipc_entry_lookup(space, dest_name);
-		if (dest_entry == IE_NULL)
+		if (dest_entry == IE_NULL) {
+			ipc_entry_lookup_failed (msg, dest_name);
 			goto invalid_dest;
+		}
 
 		reply_entry = ipc_entry_lookup(space, reply_name);
 		if (reply_entry == IE_NULL)
+		{
+			ipc_entry_lookup_failed (msg, reply_name);
 			goto invalid_reply;
+		}
 
 		assert(dest_entry != reply_entry); /* names are not equal */
 		assert(reply_type != 0); /* because reply_name not null */
@@ -1280,7 +1290,7 @@ ipc_kmsg_copyin_header(
 	return MACH_SEND_INVALID_REPLY;
 }
 
-mach_msg_return_t
+static mach_msg_return_t
 ipc_kmsg_copyin_body(
 	ipc_kmsg_t 	kmsg,
 	ipc_space_t 	space,
@@ -1299,6 +1309,10 @@ ipc_kmsg_copyin_body(
 	saddr = (vm_offset_t) (&kmsg->ikm_header + 1);
 	eaddr = (vm_offset_t) &kmsg->ikm_header + kmsg->ikm_header.msgh_size;
 
+	// We make assumptions about the alignment of the header.
+	_Static_assert(!mach_msg_kernel_is_misaligned(sizeof(mach_msg_header_t)),
+			"mach_msg_header_t needs to be MACH_MSG_KERNEL_ALIGNMENT aligned.");
+
 	while (saddr < eaddr) {
 		vm_offset_t taddr = saddr;
 		mach_msg_type_long_t *type;
@@ -1307,7 +1321,7 @@ ipc_kmsg_copyin_body(
 		mach_msg_type_number_t number;
 		boolean_t is_inline, longform, dealloc, is_port;
 		vm_offset_t data;
-		uint64_t length;
+		vm_size_t length;
 		kern_return_t kr;
 
 		type = (mach_msg_type_long_t *) saddr;
@@ -1322,50 +1336,45 @@ ipc_kmsg_copyin_body(
 		is_inline = ((mach_msg_type_t*)type)->msgt_inline;
 		dealloc = ((mach_msg_type_t*)type)->msgt_deallocate;
 		if (longform) {
-			/* This must be aligned */
-			if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-			    (is_misaligned(type))) {
-				saddr = ptr_align(saddr);
-				continue;
-			}
 			name = type->msgtl_name;
 			size = type->msgtl_size;
 			number = type->msgtl_number;
 			saddr += sizeof(mach_msg_type_long_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_long_t))) {
+				saddr = mach_msg_kernel_align(saddr);
+			}
 		} else {
 			name = ((mach_msg_type_t*)type)->msgt_name;
 			size = ((mach_msg_type_t*)type)->msgt_size;
 			number = ((mach_msg_type_t*)type)->msgt_number;
 			saddr += sizeof(mach_msg_type_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_t))) {
+				saddr = mach_msg_kernel_align(saddr);
+			}
 		}
 
 		is_port = MACH_MSG_TYPE_PORT_ANY(name);
 
-		if ((is_port && (size != PORT_T_SIZE_IN_BITS)) ||
+		if ((is_port && !is_inline && (size != PORT_NAME_T_SIZE_IN_BITS)) ||
+		    (is_port && is_inline && (size != PORT_T_SIZE_IN_BITS)) ||
+#ifndef __LP64__
 		    (longform && ((type->msgtl_header.msgt_name != 0) ||
 				  (type->msgtl_header.msgt_size != 0) ||
 				  (type->msgtl_header.msgt_number != 0))) ||
+#endif
 		    (((mach_msg_type_t*)type)->msgt_unused != 0) ||
 		    (dealloc && is_inline)) {
 			ipc_kmsg_clean_partial(kmsg, taddr, FALSE, 0);
 			return MACH_SEND_INVALID_TYPE;
 		}
 
-		/* padding (ptrs and ports) ? */
-		if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-		    ((size >> 3) == sizeof(natural_t)))
-			saddr = ptr_align(saddr);
-
 		/* calculate length of data in bytes, rounding up */
 
 		length = (((uint64_t) number * size) + 7) >> 3;
 
 		if (is_inline) {
-			vm_size_t amount;
+			vm_size_t amount = length;
 
-			/* inline data sizes round up to int boundaries */
-
-			amount = (length + 3) &~ 3;
 			if ((eaddr - saddr) < amount) {
 				ipc_kmsg_clean_partial(kmsg, taddr, FALSE, 0);
 				return MACH_SEND_MSG_TOO_SMALL;
@@ -1375,9 +1384,6 @@ ipc_kmsg_copyin_body(
 			saddr += amount;
 		} else {
 			vm_offset_t addr;
-
-			if (sizeof(vm_offset_t) > sizeof(mach_msg_type_t))
-				saddr = ptr_align(saddr);
 
 			if ((eaddr - saddr) < sizeof(vm_offset_t)) {
 				ipc_kmsg_clean_partial(kmsg, taddr, FALSE, 0);
@@ -1391,18 +1397,42 @@ ipc_kmsg_copyin_body(
 			if (length == 0)
 				data = 0;
 			else if (is_port) {
+				const vm_size_t user_length = length;
+				/*
+				 * In 64 bit architectures, out of line port names are
+				 * represented as an array of mach_port_name_t which are
+				 * smaller than mach_port_t.
+				 */
+				if (sizeof(mach_port_name_t) != sizeof(mach_port_t)) {
+					length = sizeof(mach_port_t) * number;
+					type->msgtl_size = sizeof(mach_port_t) * 8;
+				}
+
 				data = kalloc(length);
 				if (data == 0)
 					goto invalid_memory;
 
-				if (copyinmap(map, (char *) addr,
-					      (char *) data, length) ||
-				    (dealloc &&
-				     (vm_deallocate(map, addr, length) !=
-							KERN_SUCCESS))) {
+				if (user_length != length)
+				{
+					mach_port_name_t *src = (mach_port_name_t*)addr;
+					mach_port_t *dst = (mach_port_t*)data;
+					for (int i=0; i<number; i++) {
+						if (copyin_port(src + i, dst + i)) {
+							kfree(data, length);
+							goto invalid_memory;
+						}
+					}
+				} else if (copyinmap(map, (char *) addr,
+					      (char *) data, length)) {
 					kfree(data, length);
 					goto invalid_memory;
 				}
+				if (dealloc &&
+				    (vm_deallocate(map, addr, user_length) != KERN_SUCCESS)) {
+					kfree(data, length);
+					goto invalid_memory;
+				}
+
 			} else {
 				vm_map_copy_t copy;
 
@@ -1441,11 +1471,13 @@ ipc_kmsg_copyin_body(
 				((mach_msg_type_t*)type)->msgt_name = newname;
 
 			for (i = 0; i < number; i++) {
-				mach_port_t port = (mach_port_t) objects[i];
+				mach_port_name_t port = ((mach_port_t*)data)[i];
 				ipc_object_t object;
 
-				if (!MACH_PORT_VALID(port))
+				if (!MACH_PORT_NAME_VALID(port)) {
+					objects[i] = (ipc_object_t)invalid_name_to_port(port);
 					continue;
+				}
 
 				kr = ipc_object_copyin(space, port,
 						       name, &object);
@@ -1467,6 +1499,7 @@ ipc_kmsg_copyin_body(
 
 			complex = TRUE;
 		}
+		saddr = mach_msg_kernel_align(saddr);
 	}
 
 	if (!complex)
@@ -1505,7 +1538,7 @@ ipc_kmsg_copyin(
 	ipc_kmsg_t 	kmsg,
 	ipc_space_t 	space,
 	vm_map_t 	map,
-	mach_port_t 	notify)
+	mach_port_name_t notify)
 {
 	mach_msg_return_t mr;
 
@@ -1589,27 +1622,22 @@ ipc_kmsg_copyin_from_kernel(ipc_kmsg_t kmsg)
 		longform = ((mach_msg_type_t*)type)->msgt_longform;
 		/* type->msgtl_header.msgt_deallocate not used */
 		if (longform) {
-			/* This must be aligned */
-			if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-			    (is_misaligned(type))) {
-				saddr = ptr_align(saddr);
-				continue;
-			}
 			name = type->msgtl_name;
 			size = type->msgtl_size;
 			number = type->msgtl_number;
 			saddr += sizeof(mach_msg_type_long_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_long_t))) {
+				saddr = mach_msg_kernel_align(saddr);
+			}
 		} else {
 			name = ((mach_msg_type_t*)type)->msgt_name;
 			size = ((mach_msg_type_t*)type)->msgt_size;
 			number = ((mach_msg_type_t*)type)->msgt_number;
 			saddr += sizeof(mach_msg_type_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_t))) {
+				saddr = mach_msg_kernel_align(saddr);
+			}
 		}
-
-		/* padding (ptrs and ports) ? */
-		if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-		    ((size >> 3) == sizeof(natural_t)))
-			saddr = ptr_align(saddr);
 
 		/* calculate length of data in bytes, rounding up */
 
@@ -1618,10 +1646,8 @@ ipc_kmsg_copyin_from_kernel(ipc_kmsg_t kmsg)
 		is_port = MACH_MSG_TYPE_PORT_ANY(name);
 
 		if (is_inline) {
-			/* inline data sizes round up to int boundaries */
-
 			data = saddr;
-			saddr += (length + 3) &~ 3;
+			saddr += length;
 		} else {
 			/*
 			 *	The sender should supply ready-made memory
@@ -1658,6 +1684,7 @@ ipc_kmsg_copyin_from_kernel(ipc_kmsg_t kmsg)
 						MACH_MSGH_BITS_CIRCULAR;
 			}
 		}
+		saddr = mach_msg_kernel_align(saddr);
 	}
 }
 
@@ -1698,7 +1725,7 @@ mach_msg_return_t
 ipc_kmsg_copyout_header(
 	mach_msg_header_t 	*msg,
 	ipc_space_t 		space,
-	mach_port_t 		notify)
+	mach_port_name_t 		notify)
 {
 	mach_msg_bits_t mbits = msg->msgh_bits;
 	ipc_port_t dest = (ipc_port_t) msg->msgh_remote_port;
@@ -1710,9 +1737,9 @@ ipc_kmsg_copyout_header(
 
 	if (notify == MACH_PORT_NULL) switch (MACH_MSGH_BITS_PORTS(mbits)) {
 	    case MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND, 0): {
-		mach_port_t dest_name;
+		mach_port_name_t dest_name;
 		ipc_port_t nsrequest;
-		unsigned long payload;
+		rpc_uintptr_t payload;
 
 		/* receiving an asynchronous message */
 
@@ -1763,9 +1790,9 @@ ipc_kmsg_copyout_header(
 				MACH_MSG_TYPE_PORT_SEND_ONCE): {
 		ipc_entry_t entry;
 		ipc_port_t reply = (ipc_port_t) msg->msgh_local_port;
-		mach_port_t dest_name, reply_name;
+		mach_port_name_t dest_name, reply_name;
 		ipc_port_t nsrequest;
-		unsigned long payload;
+		rpc_uintptr_t payload;
 
 		/* receiving a request message */
 
@@ -1823,7 +1850,7 @@ ipc_kmsg_copyout_header(
 		entry->ie_bits = gen | (MACH_PORT_TYPE_SEND_ONCE | 1);
 	    }
 
-		assert(MACH_PORT_VALID(reply_name));
+		assert(MACH_PORT_NAME_VALID(reply_name));
 		entry->ie_object = (ipc_object_t) reply;
 		is_write_unlock(space);
 
@@ -1866,8 +1893,8 @@ ipc_kmsg_copyout_header(
 	    }
 
 	    case MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND_ONCE, 0): {
-		mach_port_t dest_name;
-		unsigned long payload;
+		mach_port_name_t dest_name;
+		rpc_uintptr_t payload;
 
 		/* receiving a reply message */
 
@@ -1920,8 +1947,8 @@ ipc_kmsg_copyout_header(
 	mach_msg_type_name_t dest_type = MACH_MSGH_BITS_REMOTE(mbits);
 	mach_msg_type_name_t reply_type = MACH_MSGH_BITS_LOCAL(mbits);
 	ipc_port_t reply = (ipc_port_t) msg->msgh_local_port;
-	mach_port_t dest_name, reply_name;
-	unsigned long payload;
+	mach_port_name_t dest_name, reply_name;
+	rpc_uintptr_t payload;
 
 	if (IP_VALID(reply)) {
 		ipc_port_t notify_port;
@@ -1998,7 +2025,7 @@ ipc_kmsg_copyout_header(
 				is_write_unlock(space);
 
 				reply = IP_DEAD;
-				reply_name = MACH_PORT_DEAD;
+				reply_name = MACH_PORT_NAME_DEAD;
 				goto copyout_dest;
 			}
 
@@ -2101,6 +2128,8 @@ ipc_kmsg_copyout_header(
 			if (((entry = ipc_entry_lookup(space, notify))
 								== IE_NULL) ||
 			    ((entry->ie_bits & MACH_PORT_TYPE_RECEIVE) == 0)) {
+				if (entry == IE_NULL)
+					ipc_entry_lookup_failed (msg, notify);
 				is_read_unlock(space);
 				return MACH_RCV_INVALID_NOTIFY;
 			}
@@ -2109,7 +2138,7 @@ ipc_kmsg_copyout_header(
 		ip_lock(dest);
 		is_read_unlock(space);
 
-		reply_name = (mach_port_t) reply;
+		reply_name = invalid_port_to_name(msg->msgh_local_port);
 	}
 
 	/*
@@ -2178,12 +2207,12 @@ ipc_kmsg_copyout_header(
 			if (ip_active(reply) ||
 			    IP_TIMESTAMP_ORDER(timestamp,
 					       reply->ip_timestamp))
-				dest_name = MACH_PORT_DEAD;
+				dest_name = MACH_PORT_NAME_DEAD;
 			else
-				dest_name = MACH_PORT_NULL;
+				dest_name = MACH_PORT_NAME_NULL;
 			ip_unlock(reply);
 		} else
-			dest_name = MACH_PORT_DEAD;
+			dest_name = MACH_PORT_NAME_DEAD;
 	}
 
 	if (IP_VALID(reply))
@@ -2228,10 +2257,10 @@ ipc_kmsg_copyout_object(
 	ipc_space_t 		space,
 	ipc_object_t 		object,
 	mach_msg_type_name_t 	msgt_name,
-	mach_port_t 		*namep)
+	mach_port_name_t 	*namep)
 {
 	if (!IO_VALID(object)) {
-		*namep = (mach_port_t) object;
+		*namep = invalid_port_to_name((mach_port_t)object);
 		return MACH_MSG_SUCCESS;
 	}
 
@@ -2301,9 +2330,9 @@ ipc_kmsg_copyout_object(
 		ipc_object_destroy(object, msgt_name);
 
 		if (kr == KERN_INVALID_CAPABILITY)
-			*namep = MACH_PORT_DEAD;
+			*namep = MACH_PORT_NAME_DEAD;
 		else {
-			*namep = MACH_PORT_NULL;
+			*namep = MACH_PORT_NAME_NULL;
 
 			if (kr == KERN_RESOURCE_SHORTAGE)
 				return MACH_MSG_IPC_KERNEL;
@@ -2336,13 +2365,17 @@ ipc_kmsg_copyout_object(
 
 mach_msg_return_t
 ipc_kmsg_copyout_body(
-	vm_offset_t 	saddr, 
-	vm_offset_t 	eaddr,
+	ipc_kmsg_t kmsg,
 	ipc_space_t 	space,
 	vm_map_t 	map)
 {
 	mach_msg_return_t mr = MACH_MSG_SUCCESS;
 	kern_return_t kr;
+	vm_offset_t saddr, eaddr;
+
+	saddr = (vm_offset_t) (&kmsg->ikm_header + 1);
+	eaddr = (vm_offset_t) &kmsg->ikm_header +
+	    kmsg->ikm_header.msgh_size;
 
 	while (saddr < eaddr) {
 		vm_offset_t taddr = saddr;
@@ -2351,34 +2384,29 @@ ipc_kmsg_copyout_body(
 		mach_msg_type_size_t size;
 		mach_msg_type_number_t number;
 		boolean_t is_inline, longform, is_port;
-		uint64_t length;
+		vm_size_t length;
 		vm_offset_t addr;
 
 		type = (mach_msg_type_long_t *) saddr;
 		is_inline = ((mach_msg_type_t*)type)->msgt_inline;
 		longform = ((mach_msg_type_t*)type)->msgt_longform;
 		if (longform) {
-			/* This must be aligned */
-			if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-			    (is_misaligned(type))) {
-				saddr = ptr_align(saddr);
-				continue;
-			}
 			name = type->msgtl_name;
 			size = type->msgtl_size;
 			number = type->msgtl_number;
 			saddr += sizeof(mach_msg_type_long_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_long_t))) {
+				saddr = mach_msg_kernel_align(saddr);
+			}
 		} else {
 			name = ((mach_msg_type_t*)type)->msgt_name;
 			size = ((mach_msg_type_t*)type)->msgt_size;
 			number = ((mach_msg_type_t*)type)->msgt_number;
 			saddr += sizeof(mach_msg_type_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_t))) {
+				saddr = mach_msg_kernel_align(saddr);
+			}
 		}
-
-		/* padding (ptrs and ports) ? */
-		if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-		    ((size >> 3) == sizeof(natural_t)))
-			saddr = ptr_align(saddr);
 
 		/* calculate length of data in bytes, rounding up */
 
@@ -2387,43 +2415,52 @@ ipc_kmsg_copyout_body(
 		is_port = MACH_MSG_TYPE_PORT_ANY(name);
 
 		if (is_port) {
-			mach_port_t *objects;
+			ipc_object_t *objects;
 			mach_msg_type_number_t i;
 
-			if (!is_inline && (length != 0)) {
-				/* first allocate memory in the map */
+			if (!is_inline) {
+				if (length != 0) {
+					vm_size_t user_length = length;
 
-				kr = vm_allocate(map, &addr, length, TRUE);
-				if (kr != KERN_SUCCESS) {
-					ipc_kmsg_clean_body(taddr, saddr);
-					goto vm_copyout_failure;
+					if (sizeof(mach_port_name_t) != sizeof(mach_port_t)) {
+						user_length = sizeof(mach_port_name_t) * number;
+					}
+
+					/* first allocate memory in the map */
+					kr = vm_allocate(map, &addr, user_length, TRUE);
+					if (kr != KERN_SUCCESS) {
+						ipc_kmsg_clean_body(taddr, saddr);
+						goto vm_copyout_failure;
+					}
+				}
+
+				if (sizeof(mach_port_name_t) != sizeof(mach_port_t)) {
+					/* Out of line ports are always returned as mach_port_name_t.
+					 * Note: we have to do this after ipc_kmsg_clean_body, otherwise
+					 * the cleanup function will not work correctly.
+					 */
+					type->msgtl_size = sizeof(mach_port_name_t) * 8;
 				}
 			}
 
-			objects = (mach_port_t *)
+			objects = (ipc_object_t *)
 				(is_inline ? saddr : * (vm_offset_t *) saddr);
 
 			/* copyout port rights carried in the message */
 
 			for (i = 0; i < number; i++) {
-				ipc_object_t object =
-					(ipc_object_t) objects[i];
+				ipc_object_t object = objects[i];
 
-				mr |= ipc_kmsg_copyout_object(space, object,
-							name, &objects[i]);
+				mr |= ipc_kmsg_copyout_object_to_port(space, object,
+								      name, (mach_port_t *)&objects[i]);
 			}
 		}
 
 		if (is_inline) {
-			/* inline data sizes round up to int boundaries */
-
 			((mach_msg_type_t*)type)->msgt_deallocate = FALSE;
-			saddr += (length + 3) &~ 3;
+			saddr += length;
 		} else {
 			vm_offset_t data;
-
-			if (sizeof(vm_offset_t) > sizeof(mach_msg_type_t))
-				saddr = ptr_align(saddr);
 
 			data = * (vm_offset_t *) saddr;
 
@@ -2435,8 +2472,19 @@ ipc_kmsg_copyout_body(
 			} else if (is_port) {
 				/* copyout to memory allocated above */
 
-				(void) copyoutmap(map, (char *) data,
-						  (char *) addr, length);
+				if (sizeof(mach_port_name_t) != sizeof(mach_port_t)) {
+					mach_port_t *src = (mach_port_t*)data;
+					mach_port_name_t *dst = (mach_port_name_t*)addr;
+					for (int i=0; i<number; i++) {
+						if (copyout_port(src + i, dst + i)) {
+							kr = KERN_FAILURE;
+							goto vm_copyout_failure;
+						}
+					}
+				} else {
+					(void) copyoutmap(map, (char *) data,
+							  (char *) addr, length);
+				}
 				kfree(data, length);
 			} else {
 				vm_map_copy_t copy = (vm_map_copy_t) data;
@@ -2464,6 +2512,9 @@ ipc_kmsg_copyout_body(
 			* (vm_offset_t *) saddr = addr;
 			saddr += sizeof(vm_offset_t);
 		}
+
+		/* Next element is always correctly aligned */
+		saddr = mach_msg_kernel_align(saddr);
 	}
 
 	return mr;
@@ -2492,7 +2543,7 @@ ipc_kmsg_copyout(
 	ipc_kmsg_t 	kmsg,
 	ipc_space_t 	space,
 	vm_map_t 	map,
-	mach_port_t 	notify)
+	mach_port_name_t 	notify)
 {
 	mach_msg_bits_t mbits = kmsg->ikm_header.msgh_bits;
 	mach_msg_return_t mr;
@@ -2502,13 +2553,7 @@ ipc_kmsg_copyout(
 		return mr;
 
 	if (mbits & MACH_MSGH_BITS_COMPLEX) {
-		vm_offset_t saddr, eaddr;
-
-		saddr = (vm_offset_t) (&kmsg->ikm_header + 1);
-		eaddr = (vm_offset_t) &kmsg->ikm_header +
-				kmsg->ikm_header.msgh_size;
-
-		mr = ipc_kmsg_copyout_body(saddr, eaddr, space, map);
+		mr = ipc_kmsg_copyout_body(kmsg, space, map);
 		if (mr != MACH_MSG_SUCCESS)
 			mr |= MACH_RCV_BODY_ERROR;
 	}
@@ -2547,7 +2592,7 @@ ipc_kmsg_copyout_pseudo(
 	ipc_object_t reply = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
 	mach_msg_type_name_t dest_type = MACH_MSGH_BITS_REMOTE(mbits);
 	mach_msg_type_name_t reply_type = MACH_MSGH_BITS_LOCAL(mbits);
-	mach_port_t dest_name, reply_name;
+	mach_port_name_t dest_name, reply_name;
 	mach_msg_return_t mr;
 
 	assert(IO_VALID(dest));
@@ -2560,13 +2605,7 @@ ipc_kmsg_copyout_pseudo(
 	kmsg->ikm_header.msgh_local_port = reply_name;
 
 	if (mbits & MACH_MSGH_BITS_COMPLEX) {
-		vm_offset_t saddr, eaddr;
-
-		saddr = (vm_offset_t) (&kmsg->ikm_header + 1);
-		eaddr = (vm_offset_t) &kmsg->ikm_header +
-				kmsg->ikm_header.msgh_size;
-
-		mr |= ipc_kmsg_copyout_body(saddr, eaddr, space, map);
+		mr |= ipc_kmsg_copyout_body(kmsg, space, map);
 	}
 
 	return mr;
@@ -2591,7 +2630,7 @@ ipc_kmsg_copyout_dest(
 	ipc_object_t reply = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
 	mach_msg_type_name_t dest_type = MACH_MSGH_BITS_REMOTE(mbits);
 	mach_msg_type_name_t reply_type = MACH_MSGH_BITS_LOCAL(mbits);
-	mach_port_t dest_name, reply_name;
+	mach_port_name_t dest_name, reply_name;
 
 	assert(IO_VALID(dest));
 
@@ -2602,14 +2641,14 @@ ipc_kmsg_copyout_dest(
 	} else {
 		io_release(dest);
 		io_check_unlock(dest);
-		dest_name = MACH_PORT_DEAD;
+		dest_name = MACH_PORT_NAME_DEAD;
 	}
 
 	if (IO_VALID(reply)) {
 		ipc_object_destroy(reply, reply_type);
-		reply_name = MACH_PORT_NULL;
+		reply_name = MACH_PORT_NAME_NULL;
 	} else
-		reply_name = (mach_port_t) reply;
+		reply_name = invalid_port_to_name((mach_port_t)reply);
 
 	kmsg->ikm_header.msgh_bits = (MACH_MSGH_BITS_OTHER(mbits) |
 				      MACH_MSGH_BITS(reply_type, dest_type));
@@ -2629,7 +2668,7 @@ ipc_kmsg_copyout_dest(
 
 #if	MACH_KDB
 
-char *
+static char *
 ipc_type_name(
 	int 		type_name,
 	boolean_t 	received)
@@ -2697,7 +2736,7 @@ ipc_type_name(
 	}
 }
 
-void
+static void
 ipc_print_type_name(
 	int	type_name)
 {
@@ -2757,7 +2796,7 @@ ipc_msg_print(mach_msg_header_t *msgh)
 		  MACH_MSGH_BITS_LOCAL(msgh->msgh_bits),
 		  MACH_MSGH_BITS_REMOTE(msgh->msgh_bits));
 
-	db_printf("msgh_id=%d,size=%d,seqno=%d,",
+	db_printf("msgh_id=%d,size=%u,seqno=%d,",
 		  msgh->msgh_id,
 		  msgh->msgh_size,
 		  msgh->msgh_seqno);
@@ -2801,21 +2840,21 @@ ipc_msg_print(mach_msg_header_t *msgh)
 		is_inline = ((mach_msg_type_t*)type)->msgt_inline;
 		dealloc = ((mach_msg_type_t*)type)->msgt_deallocate;
 		if (longform) {
-			/* This must be aligned */
-			if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-			    (is_misaligned(type))) {
-				saddr = ptr_align(saddr);
-				continue;
-			}
 			name = type->msgtl_name;
 			size = type->msgtl_size;
 			number = type->msgtl_number;
 			saddr += sizeof(mach_msg_type_long_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_long_t))) {
+				saddr = mach_msg_kernel_align(saddr);
+			}
 		} else {
 			name = ((mach_msg_type_t*)type)->msgt_name;
 			size = ((mach_msg_type_t*)type)->msgt_size;
 			number = ((mach_msg_type_t*)type)->msgt_number;
 			saddr += sizeof(mach_msg_type_t);
+			if (mach_msg_kernel_is_misaligned(sizeof(mach_msg_type_t))) {
+				saddr = mach_msg_kernel_align(saddr);
+			}
 		}
 
 		db_printf("-- type=");
@@ -2837,19 +2876,16 @@ ipc_msg_print(mach_msg_header_t *msgh)
 		is_port = MACH_MSG_TYPE_PORT_ANY(name);
 
 		if ((is_port && (size != PORT_T_SIZE_IN_BITS)) ||
+#ifndef __LP64__
 		    (longform && ((type->msgtl_header.msgt_name != 0) ||
 				  (type->msgtl_header.msgt_size != 0) ||
 				  (type->msgtl_header.msgt_number != 0))) ||
+#endif
 		    (((mach_msg_type_t*)type)->msgt_unused != 0) ||
 		    (dealloc && is_inline)) {
 			db_printf("*** invalid type\n");
 			return;
 		}
-
-		/* padding (ptrs and ports) ? */
-		if ((sizeof(natural_t) > sizeof(mach_msg_type_t)) &&
-		    ((size >> 3) == sizeof(natural_t)))
-			saddr = ptr_align(saddr);
 
 		/* calculate length of data in bytes, rounding up */
 
@@ -2859,7 +2895,7 @@ ipc_msg_print(mach_msg_header_t *msgh)
 			vm_size_t amount;
 			unsigned i, numwords;
 
-			/* inline data sizes round up to int boundaries */
+			/* round up to int boundaries for printing */
 			amount = (length + 3) &~ 3;
 			if ((eaddr - saddr) < amount) {
 				db_printf("*** too small\n");
@@ -2884,6 +2920,7 @@ ipc_msg_print(mach_msg_header_t *msgh)
 			db_printf("0x%x\n", * (vm_offset_t *) saddr);
 			saddr += sizeof(vm_offset_t);
 		}
+		saddr = mach_msg_kernel_align(saddr);
 	}
 }
 #endif	/* MACH_KDB */

@@ -62,9 +62,10 @@ struct task {
 	int		ref_count;	/* Number of references to me */
 
 	/* Flags */
-	unsigned int	active:1,	/* Task has not been terminated */
+	unsigned char	assign_active;	/* waiting for may_assign */
+	unsigned char	active:1,	/* Task has not been terminated */
 	/* boolean_t */ may_assign:1,	/* can assigned pset be changed? */
-			assign_active:1;	/* waiting for may_assign */
+			essential:1;	/* Is this task essential for the system? */
 
 	/* Miscellaneous */
 	vm_map_t	map;		/* Address space description */
@@ -81,12 +82,12 @@ struct task {
 	int		priority;		/* for new threads */
 
 	/* Statistics */
-	time_value_t	total_user_time;
+	time_value64_t	total_user_time;
 				/* total user time for dead threads */
-	time_value_t	total_system_time;
+	time_value64_t	total_system_time;
 				/* total system time for dead threads */
 
-	time_value_t	creation_time; /* time stamp at creation */
+	time_value64_t	creation_time; /* time stamp at creation */
 
 	/* IPC structures */
 	decl_simple_lock_data(, itk_lock_data)
@@ -114,13 +115,13 @@ struct task {
 	machine_task_t	machine;
 
 	/* Statistics */
-	natural_t	faults;		/* page faults counter */
-	natural_t	zero_fills;	/* zero fill pages counter */
-	natural_t	reactivations;	/* reactivated pages counter */
-	natural_t	pageins;	/* actual pageins couter */
-	natural_t	cow_faults;	/* copy-on-write faults counter */
-	natural_t	messages_sent;	/* messages sent counter */
-	natural_t	messages_received; /* messages received counter */
+	long_natural_t	faults;		/* page faults counter */
+	long_natural_t	zero_fills;	/* zero fill pages counter */
+	long_natural_t	reactivations;	/* reactivated pages counter */
+	long_natural_t	pageins;	/* actual pageins couter */
+	long_natural_t	cow_faults;	/* copy-on-write faults counter */
+	long_natural_t	messages_sent;	/* messages sent counter */
+	long_natural_t	messages_received; /* messages received counter */
 
 	char	name[TASK_NAME_SIZE];
 };
@@ -176,7 +177,7 @@ extern kern_return_t	task_assign_default(
 	boolean_t	assign_threads);
 extern kern_return_t	task_set_name(
 	task_t			task,
-	kernel_debug_name_t	name);
+	const_kernel_debug_name_t	name);
 extern void consider_task_collect(void);
 
 /*

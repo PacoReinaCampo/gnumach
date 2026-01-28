@@ -45,7 +45,6 @@
 #include <mach/vm_param.h>
 #include <mach/vm_prot.h>
 #ifdef MIGRATING_THREADS
-#include <mach/rpc.h>
 #include <kern/task.h>
 #include <kern/act.h>
 #endif /* MIGRATING_THREADS */
@@ -60,7 +59,7 @@
 #include <ipc/ipc_pset.h>
 #include <ipc/ipc_right.h>
 #include <ipc/mach_port.h>
-
+#include <ipc/mach_port.server.h>
 
 
 /*
@@ -69,12 +68,12 @@
  *		A helper function for mach_port_names.
  */
 
-void
+static void
 mach_port_names_helper(
 	ipc_port_timestamp_t	timestamp,
 	ipc_entry_t		entry,
-	mach_port_t		name,
-	mach_port_t		*names,
+	mach_port_name_t	name,
+	mach_port_name_t	*names,
 	mach_port_type_t	*types,
 	ipc_entry_num_t		*actualp)
 {
@@ -145,14 +144,14 @@ mach_port_names_helper(
 kern_return_t
 mach_port_names(
 	ipc_space_t		space,
-	mach_port_t		**namesp,
+	mach_port_name_t	**namesp,
 	mach_msg_type_number_t	*namesCnt,
 	mach_port_type_t	**typesp,
 	mach_msg_type_number_t	*typesCnt)
 {
 	ipc_entry_num_t actual;	/* this many names */
 	ipc_port_timestamp_t timestamp;	/* logical time of this operation */
-	mach_port_t *names;
+	mach_port_name_t *names;
 	mach_port_type_t *types;
 	kern_return_t kr;
 
@@ -161,9 +160,10 @@ mach_port_names(
 	vm_offset_t addr2;	/* allocated memory, for types */
 	vm_map_copy_t memory1;	/* copied-in memory, for names */
 	vm_map_copy_t memory2;	/* copied-in memory, for types */
+	ipc_entry_num_t bound;
 
 	/* safe simplifying assumption */
-	assert_static(sizeof(mach_port_t) == sizeof(mach_port_type_t));
+	assert_static(sizeof(mach_port_name_t) == sizeof(mach_port_type_t));
 
 	if (space == IS_NULL)
 		return KERN_INVALID_TASK;
@@ -171,7 +171,6 @@ mach_port_names(
 	size = 0;
 
 	for (;;) {
-		ipc_entry_num_t bound;
 		vm_size_t size_needed;
 
 		is_read_lock(space);
@@ -187,7 +186,7 @@ mach_port_names(
 		/* upper bound on number of names in the space */
 
 		bound = space->is_size;
-		size_needed = round_page(bound * sizeof(mach_port_t));
+		size_needed = round_page(bound * sizeof(mach_port_name_t));
 
 		if (size_needed <= size)
 			break;
@@ -225,7 +224,7 @@ mach_port_names(
 	}
 	/* space is read-locked and active */
 
-	names = (mach_port_t *) addr1;
+	names = (mach_port_name_t *) addr1;
 	types = (mach_port_type_t *) addr2;
 	actual = 0;
 
@@ -241,6 +240,7 @@ mach_port_names(
 					       names, types, &actual);
 		}
 	}
+	assert(actual < bound);
 	is_read_unlock(space);
 
 	if (actual == 0) {
@@ -254,7 +254,7 @@ mach_port_names(
 	} else {
 		vm_size_t size_used;
 
-		size_used = round_page(actual * sizeof(mach_port_t));
+		size_used = round_page(actual * sizeof(mach_port_name_t));
 
 		/*
 		 *	Make used memory pageable and get it into
@@ -287,7 +287,7 @@ mach_port_names(
 		}
 	}
 
-	*namesp = (mach_port_t *) memory1;
+	*namesp = (mach_port_name_t *) memory1;
 	*namesCnt = actual;
 	*typesp = (mach_port_type_t *) memory2;
 	*typesCnt = actual;
@@ -327,7 +327,7 @@ mach_port_names(
 kern_return_t
 mach_port_type(
 	ipc_space_t		space,
-	mach_port_t		name,
+	mach_port_name_t	name,
 	mach_port_type_t	*typep)
 {
 	mach_port_urefs_t urefs;
@@ -368,14 +368,14 @@ mach_port_type(
 
 kern_return_t
 mach_port_rename(
-	ipc_space_t	space,
-	mach_port_t	oname,
-	mach_port_t	nname)
+	ipc_space_t		space,
+	mach_port_name_t	oname,
+	mach_port_name_t	nname)
 {
 	if (space == IS_NULL)
 		return KERN_INVALID_TASK;
 
-	if (!MACH_PORT_VALID(nname))
+	if (!MACH_PORT_NAME_VALID(nname))
 		return KERN_INVALID_VALUE;
 
 	return ipc_object_rename(space, oname, nname);
@@ -416,14 +416,14 @@ kern_return_t
 mach_port_allocate_name(
 	ipc_space_t 		space,
 	mach_port_right_t 	right,
-	mach_port_t 		name)
+	mach_port_name_t 	name)
 {
 	kern_return_t kr;
 
 	if (space == IS_NULL)
 		return KERN_INVALID_TASK;
 
-	if (!MACH_PORT_VALID(name))
+	if (!MACH_PORT_NAME_VALID(name))
 		return KERN_INVALID_VALUE;
 
 	switch (right) {
@@ -479,7 +479,7 @@ kern_return_t
 mach_port_allocate(
 	ipc_space_t 		space,
 	mach_port_right_t 	right,
-	mach_port_t 		*namep)
+	mach_port_name_t 	*namep)
 {
 	kern_return_t kr;
 
@@ -534,12 +534,12 @@ mach_port_allocate(
  *		KERN_INVALID_NAME	The name doesn't denote a right.
  */
 
-static volatile boolean_t mach_port_deallocate_debug = FALSE;
+volatile boolean_t mach_port_deallocate_debug = FALSE;
 
 kern_return_t
 mach_port_destroy(
-	ipc_space_t	space,
-	mach_port_t	name)
+	ipc_space_t		space,
+	mach_port_name_t	name)
 {
 	ipc_entry_t entry;
 	kern_return_t kr;
@@ -549,7 +549,7 @@ mach_port_destroy(
 
 	kr = ipc_right_lookup_write(space, name, &entry);
 	if (kr != KERN_SUCCESS) {
-		if (MACH_PORT_VALID (name) && space == current_space()) {
+		if (MACH_PORT_NAME_VALID (name) && space == current_space()) {
 			printf("task %.*s destroying a bogus port %lu, most probably a bug.\n", (int) sizeof current_task()->name, current_task()->name, (unsigned long) name);
 			if (mach_port_deallocate_debug)
 				SoftDebugger("mach_port_deallocate");
@@ -582,8 +582,8 @@ mach_port_destroy(
 
 kern_return_t
 mach_port_deallocate(
-	ipc_space_t	space,
-	mach_port_t	name)
+	ipc_space_t		space,
+	mach_port_name_t	name)
 {
 	ipc_entry_t entry;
 	kern_return_t kr;
@@ -593,7 +593,7 @@ mach_port_deallocate(
 
 	kr = ipc_right_lookup_write(space, name, &entry);
 	if (kr != KERN_SUCCESS) {
-		if (MACH_PORT_VALID (name) && space == current_space()) {
+		if (MACH_PORT_NAME_VALID (name) && space == current_space()) {
 			printf("task %.*s deallocating a bogus port %lu, most probably a bug.\n", (int) sizeof current_task()->name, current_task()->name, (unsigned long) name);
 			if (mach_port_deallocate_debug)
 				SoftDebugger("mach_port_deallocate");
@@ -626,7 +626,7 @@ mach_port_deallocate(
 kern_return_t
 mach_port_get_refs(
 	ipc_space_t		space,
-	mach_port_t		name,
+	mach_port_name_t	name,
 	mach_port_right_t	right,
 	mach_port_urefs_t	*urefsp)
 {
@@ -700,7 +700,7 @@ mach_port_get_refs(
 kern_return_t
 mach_port_mod_refs(
 	ipc_space_t		space,
-	mach_port_t		name,
+	mach_port_name_t	name,
 	mach_port_right_t	right,
 	mach_port_delta_t	delta)
 {
@@ -715,9 +715,9 @@ mach_port_mod_refs(
 
 	kr = ipc_right_lookup_write(space, name, &entry);
 	if (kr != KERN_SUCCESS) {
-		if (MACH_PORT_VALID (name) && space == current_space()) {
+		if (MACH_PORT_NAME_VALID (name) && space == current_space()) {
 			printf("task %.*s %screasing a bogus port "
-			       "%lu by %d, most probably a bug.\n",
+			       "%u by %d, most probably a bug.\n",
 			       (int) (sizeof current_task()->name),
 			       current_task()->name,
 			       delta < 0 ? "de" : "in", name,
@@ -753,7 +753,7 @@ mach_port_mod_refs(
 kern_return_t
 mach_port_set_qlimit(
 	ipc_space_t 		space,
-	mach_port_t 		name,
+	mach_port_name_t 	name,
 	mach_port_msgcount_t 	qlimit)
 {
 	ipc_port_t port;
@@ -793,7 +793,7 @@ mach_port_set_qlimit(
 kern_return_t
 mach_port_set_mscount(
 	ipc_space_t		space,
-	mach_port_t		name,
+	mach_port_name_t	name,
 	mach_port_mscount_t	mscount)
 {
 	ipc_port_t port;
@@ -830,7 +830,7 @@ mach_port_set_mscount(
 kern_return_t
 mach_port_set_seqno(
 	ipc_space_t		space,
-	mach_port_t		name,
+	mach_port_name_t	name,
 	mach_port_seqno_t	seqno)
 {
 	ipc_port_t port;
@@ -856,16 +856,16 @@ mach_port_set_seqno(
  *		A helper function for mach_port_get_set_status.
  */
 
-void
+static void
 mach_port_gst_helper(
 	ipc_pset_t		pset,
 	ipc_port_t		port,
 	ipc_entry_num_t		maxnames,
-	mach_port_t		*names,
+	mach_port_name_t	*names,
 	ipc_entry_num_t		*actualp)
 {
 	ipc_pset_t ip_pset;
-	mach_port_t name;
+	mach_port_name_t name;
 
 	assert(port != IP_NULL);
 
@@ -907,8 +907,8 @@ mach_port_gst_helper(
 kern_return_t
 mach_port_get_set_status(
 	ipc_space_t			space,
-	mach_port_t			name,
-	mach_port_t			**members,
+	mach_port_name_t		name,
+	mach_port_name_t		**members,
 	mach_msg_type_number_t		*membersCnt)
 {
 	ipc_entry_num_t actual;		/* this many members */
@@ -926,7 +926,7 @@ mach_port_get_set_status(
 
 	for (;;) {
 		ipc_entry_t entry;
-		mach_port_t *names;
+		mach_port_name_t *names;
 		ipc_pset_t pset;
 
 		kr = vm_allocate(ipc_kernel_map, &addr, size, TRUE);
@@ -958,8 +958,8 @@ mach_port_get_set_status(
 		assert(pset != IPS_NULL);
 		/* the port set must be active */
 
-		names = (mach_port_t *) addr;
-		maxnames = size / sizeof(mach_port_t);
+		names = (mach_port_name_t *) addr;
+		maxnames = size / sizeof(mach_port_name_t);
 		actual = 0;
 
 		ipc_entry_t ientry;
@@ -984,7 +984,7 @@ mach_port_get_set_status(
 		/* didn't have enough memory; allocate more */
 
 		kmem_free(ipc_kernel_map, addr, size);
-		size = round_page(actual * sizeof(mach_port_t)) + PAGE_SIZE;
+		size = round_page(actual * sizeof(mach_port_name_t)) + PAGE_SIZE;
 	}
 
 	if (actual == 0) {
@@ -994,7 +994,7 @@ mach_port_get_set_status(
 	} else {
 		vm_size_t size_used;
 
-		size_used = round_page(actual * sizeof(mach_port_t));
+		size_used = round_page(actual * sizeof(mach_port_name_t));
 
 		/*
 		 *	Make used memory pageable and get it into
@@ -1015,7 +1015,7 @@ mach_port_get_set_status(
 				  addr + size_used, size - size_used);
 	}
 
-	*members = (mach_port_t *) memory;
+	*members = (mach_port_name_t *) memory;
 	*membersCnt = actual;
 	return KERN_SUCCESS;
 }
@@ -1044,8 +1044,8 @@ mach_port_get_set_status(
 kern_return_t
 mach_port_move_member(
 	ipc_space_t	space,
-	mach_port_t	member,
-	mach_port_t	after)
+	mach_port_name_t	member,
+	mach_port_name_t	after)
 {
 	ipc_entry_t entry;
 	ipc_port_t port;
@@ -1138,7 +1138,7 @@ mach_port_move_member(
 kern_return_t
 mach_port_request_notification(
 	ipc_space_t		space,
-	mach_port_t		name,
+	mach_port_name_t		name,
 	mach_msg_id_t		id,
 	mach_port_mscount_t	sync,
 	ipc_port_t		notify,
@@ -1222,14 +1222,14 @@ mach_port_request_notification(
 kern_return_t
 mach_port_insert_right(
 	ipc_space_t		space,
-	mach_port_t		name,
+	mach_port_name_t	name,
 	ipc_port_t		poly,
 	mach_msg_type_name_t	polyPoly)
 {
 	if (space == IS_NULL)
 		return KERN_INVALID_TASK;
 
-	if (!MACH_PORT_VALID(name) ||
+	if (!MACH_PORT_NAME_VALID(name) ||
 	    !MACH_MSG_TYPE_PORT_ANY_RIGHT(polyPoly))
 		return KERN_INVALID_VALUE;
 
@@ -1259,7 +1259,7 @@ mach_port_insert_right(
 kern_return_t
 mach_port_extract_right(
 	ipc_space_t		space,
-	mach_port_t		name,
+	mach_port_name_t	name,
 	mach_msg_type_name_t	msgt_name,
 	ipc_port_t		*poly,
 	mach_msg_type_name_t	*polyPoly)
@@ -1296,7 +1296,7 @@ mach_port_extract_right(
 kern_return_t
 mach_port_get_receive_status(
 	ipc_space_t 		space,
-	mach_port_t 		name,
+	mach_port_name_t 	name,
 	mach_port_status_t 	*statusp)
 {
 	ipc_port_t port;
@@ -1324,7 +1324,7 @@ mach_port_get_receive_status(
 			statusp->mps_seqno = port->ip_seqno;
 			imq_unlock(&pset->ips_messages);
 			ips_unlock(pset);
-			assert(MACH_PORT_VALID(statusp->mps_pset));
+			assert(MACH_PORT_NAME_VALID(statusp->mps_pset));
 		}
 	} else {
 	    no_port_set:
@@ -1350,7 +1350,7 @@ mach_port_get_receive_status(
 kern_return_t
 mach_port_set_rpcinfo(
 	ipc_space_t 	space,
-	mach_port_t 	name,
+	mach_port_name_t 	name,
 	void 		*rpc_info,
 	unsigned int 	rpc_info_count)
 {
@@ -1394,7 +1394,7 @@ void sact_count(void)
 kern_return_t
 mach_port_create_act(
 	task_t 		task,
-	mach_port_t 	name,
+	mach_port_name_t 	name,
 	vm_offset_t 	user_stack,
 	vm_offset_t 	user_rbuf,
 	vm_size_t 	user_rbuf_size,
@@ -1467,7 +1467,7 @@ mach_port_create_act(
 kern_return_t
 mach_port_set_syscall_right(
 	task_t 		task,
-	mach_port_t 	name)
+	mach_port_name_t 	name)
 {
 	ipc_entry_t entry;
 	kern_return_t kr;
@@ -1511,8 +1511,8 @@ mach_port_set_syscall_right(
 kern_return_t
 mach_port_set_protected_payload(
 	ipc_space_t		space,
-	mach_port_t		name,
-	unsigned long		payload)
+	mach_port_name_t	name,
+	rpc_uintptr_t		payload)
 {
 	ipc_port_t port;
 	kern_return_t kr;
@@ -1548,7 +1548,7 @@ mach_port_set_protected_payload(
 kern_return_t
 mach_port_clear_protected_payload(
 	ipc_space_t		space,
-	mach_port_t		name)
+	mach_port_name_t	name)
 {
 	ipc_port_t port;
 	kern_return_t kr;
@@ -1565,6 +1565,45 @@ mach_port_clear_protected_payload(
 
 	ip_unlock(port);
 	return KERN_SUCCESS;
+}
+
+kern_return_t
+mach_port_set_ktype(
+        host_t host_priv,
+        ipc_space_t space,
+        mach_port_name_t name,
+        mach_port_right_t right,
+        mach_port_ktype_t ktype)
+{
+	ipc_port_t port;
+	kern_return_t kr;
+
+	if (host_priv == HOST_NULL)
+	  return KERN_INVALID_HOST;
+
+	if (space == IS_NULL)
+	  return KERN_INVALID_TASK;
+
+	if (ktype != MACH_PORT_KTYPE_NONE
+	    && ktype != MACH_PORT_KTYPE_USER_DEVICE)
+	  return KERN_INVALID_ARGUMENT;
+
+	kr = ipc_object_translate(space, name, right, (ipc_object_t *)&port);
+	if (kr != KERN_SUCCESS)
+	  return kr;
+
+	/* port is locked and active */
+	if (ip_kotype(port) == IKOT_NONE || ip_kotype(port) == IKOT_USER_DEVICE)
+	  ipc_kobject_set_locked(port, IKO_NULL,
+				 ktype == MACH_PORT_KTYPE_NONE
+				 ? IKOT_NONE
+				 : IKOT_USER_DEVICE);
+	else
+	  kr = KERN_INVALID_ARGUMENT;
+
+	ip_unlock(port);
+
+	return kr;
 }
 
 #if	MACH_KDB

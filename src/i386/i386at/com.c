@@ -33,7 +33,6 @@
 #include <sys/types.h>
 #include <kern/printf.h>
 #include <kern/mach_clock.h>
-#include <sys/time.h>
 #include <device/conf.h>
 #include <device/device_types.h>
 #include <device/tty.h>
@@ -41,7 +40,7 @@
 
 #include <i386/ipl.h>
 #include <i386/pio.h>
-#include <i386/machspl.h>
+#include <i386/spl.h>
 #include <chips/busses.h>
 #include <i386at/autoconf.h>
 #include <i386at/com.h>
@@ -49,7 +48,7 @@
 
 #include <device/cons.h>
 
-static void comparam();
+static void comparam(int);
 
 static vm_offset_t com_std[NCOM] = { 0 };
 struct bus_device *cominfo[NCOM];
@@ -63,20 +62,15 @@ boolean_t comfifo[NCOM];
 boolean_t comtimer_active;
 int comtimer_state[NCOM];
 
-#define RCBAUD B9600
+#define RCBAUD B115200
 static int rcline = -1;
 static struct bus_device *comcndev;
 
 /* XX */
 extern char *kernel_cmdline;
 
-#ifndef	PORTSELECTOR
-#define ISPEED	B9600
-#define IFLAGS	(EVENP|ODDP|ECHO|CRMOD)
-#else
-#define ISPEED	B4800
-#define IFLAGS	(EVENP|ODDP)
-#endif
+#define ISPEED	B115200
+#define IFLAGS	(EVENP|ODDP|ECHO|CRMOD|XTABS|LITOUT)
 
 u_short divisorreg[] = {
 	0,	2304,	1536,	1047,		/*     0,    50,    75,   110*/
@@ -92,7 +86,7 @@ u_short divisorreg[] = {
  * the relevant device is present today.
  *
  */
-int
+static int
 comprobe_general(struct bus_device *dev, int noisy)
 {
 	u_short	addr = dev->address;
@@ -101,7 +95,7 @@ comprobe_general(struct bus_device *dev, int noisy)
 	char    *type = "8250";
 	int     i;
 
-	if ((unit < 0) || (unit > NCOM)) {
+	if ((unit < 0) || (unit >= NCOM)) {
 		printf("com %d out of range\n", unit);
 		return(0);
 	}
@@ -189,6 +183,11 @@ comcnprobe(struct consdev *cp)
 	if (console)
 		mach_atoi(console + strlen(CONSOLE_PARAMETER), &rcline);
 
+	if (strncmp(kernel_cmdline, CONSOLE_PARAMETER + 1,
+		    strlen(CONSOLE_PARAMETER) - 1) == 0)
+            mach_atoi((u_char*)kernel_cmdline + strlen(CONSOLE_PARAMETER) - 1,
+			  &rcline);
+
 	maj = 0;
 	unit = -1;
 	pri = CN_DEAD;
@@ -224,8 +223,13 @@ comattach(struct bus_device *dev)
 	u_char	unit = dev->unit;
 	u_short	addr = dev->address;
 
+	if (unit >= NCOM) {
+		printf(", disabled by NCOM configuration\n");
+		return;
+	}
+
 	take_dev_irq(dev);
-	printf(", port = %lx, spl = %ld, pic = %d. (DOS COM%d)",
+	printf(", port = %zx, spl = %zu, pic = %d. (DOS COM%d)",
 	       dev->address, dev->sysdep, dev->sysdep1, unit+1);
 
 /*	comcarrier[unit] = addr->flags;*/
@@ -267,7 +271,7 @@ comcninit(struct consdev *cp)
 
 	{
 		char	msg[128];
-		volatile unsigned char *p = (volatile unsigned char *)0xb8000;
+		volatile unsigned char *p = (volatile unsigned char *)phystokv(0xb8000);
 		int	i;
 
 		sprintf(msg, "    **** using COM port %d for console ****",
@@ -289,7 +293,7 @@ comcninit(struct consdev *cp)
  *	Used to handle PCMCIA modems, which may appear
  *	at any time.
  */
-boolean_t com_reprobe(
+static boolean_t com_reprobe(
 	int	unit)
 {
 	struct bus_device	*device;
@@ -352,18 +356,12 @@ io_return_t comopen(
 		tp->t_mctl = commctl;
 		tp->t_getstat = comgetstat;
 		tp->t_setstat = comsetstat;
-#ifndef	PORTSELECTOR
 		if (tp->t_ispeed == 0) {
-#else
-			tp->t_state |= TS_HUPCLS;
-#endif	/* PORTSELECTOR */
 			tp->t_ispeed = ISPEED;
 			tp->t_ospeed = ISPEED;
 			tp->t_flags = IFLAGS;
 			tp->t_state &= ~TS_BUSY;
-#ifndef	PORTSELECTOR
 		}
-#endif	/* PORTSELECTOR */
 	}
 /*rvb	tp->t_state |= TS_WOPEN; */
 	if ((tp->t_state & TS_ISOPEN) == 0)
@@ -400,9 +398,7 @@ io_return_t comopen(
 	return result;
 }
 
-void comclose(dev, flag)
-dev_t dev;
-int flag;
+void comclose(dev_t dev, int flag)
 {
 	struct tty	*tp = &com_tty[minor(dev)];
 	u_short		addr = (uintptr_t)tp->t_addr;
@@ -419,33 +415,28 @@ int flag;
 	return;
 }
 
-io_return_t comread(dev, ior)
-dev_t	dev;
-io_req_t ior;
+io_return_t comread(dev_t dev, io_req_t ior)
 {
 	return char_read(&com_tty[minor(dev)], ior);
 }
 
-io_return_t comwrite(dev, ior)
-dev_t	dev;
-io_req_t ior;
+io_return_t comwrite(dev_t dev, io_req_t ior)
 {
 	return char_write(&com_tty[minor(dev)], ior);
 }
 
-io_return_t comportdeath(dev, port)
-dev_t		dev;
-mach_port_t	port;
+io_return_t comportdeath(dev_t dev, mach_port_t port)
 {
 	return (tty_portdeath(&com_tty[minor(dev)], (ipc_port_t)port));
 }
 
 io_return_t
-comgetstat(dev, flavor, data, count)
-dev_t		dev;
-dev_flavor_t	flavor;
-dev_status_t	data;		/* pointer to OUT array */
-mach_msg_type_number_t	*count;		/* out */
+comgetstat(
+  dev_t dev,
+  dev_flavor_t flavor,
+  dev_status_t data, /* pointer to OUT array */
+  mach_msg_type_number_t *count /* out */
+  )
 {
 	io_return_t	result = D_SUCCESS;
 	int		unit = minor(dev);
@@ -613,26 +604,6 @@ comparam(int unit)
 	outb(MODEM_CTL(addr), iDTR|iRTS|iOUT2);
 	commodem[unit] |= (TM_DTR|TM_RTS);
         splx(s);
-}
-
-void
-comparm(int unit, int baud, int intr, int mode, int modem)
-{
-	u_short addr = (u_short)(cominfo[unit]->address);
-	spl_t	s = spltty();
-
-	if (unit != 0 && unit != 1) {
-		printf("comparm(unit, baud, mode, intr, modem)\n");
-		splx(s);
-		return;
-	}
-	outb(LINE_CTL(addr), iDLAB);
-	outb(BAUD_LSB(addr), divisorreg[baud] & 0xff);
-	outb(BAUD_MSB(addr), divisorreg[baud] >> 8);
-	outb(LINE_CTL(addr), mode);
-	outb(INTR_ENAB(addr), intr);
-	outb(MODEM_CTL(addr), modem);
-	splx(s);
 }
 
 int comst_1, comst_2, comst_3, comst_4, comst_5 = 14;
@@ -858,11 +829,11 @@ void compr_addr(vm_offset_t addr)
 	/* The two line_stat prints may show different values, since
 	*  touching some of the registers constitutes changing them.
 	*/
-	printf("LINE_STAT(%lu) %x\n",
+	printf("LINE_STAT(%zu) %x\n",
 		LINE_STAT(addr), inb(LINE_STAT(addr)));
 
-	printf("TXRX(%lu) %x, INTR_ENAB(%lu) %x, INTR_ID(%lu) %x, LINE_CTL(%lu) %x,\n\
-MODEM_CTL(%lu) %x, LINE_STAT(%lu) %x, MODEM_STAT(%lu) %x\n",
+	printf("TXRX(%zu) %x, INTR_ENAB(%zu) %x, INTR_ID(%zu) %x, LINE_CTL(%zu) %x,\n\
+MODEM_CTL(%zu) %x, LINE_STAT(%zu) %x, MODEM_STAT(%zu) %x\n",
 	TXRX(addr), 	 inb(TXRX(addr)),
 	INTR_ENAB(addr), inb(INTR_ENAB(addr)),
 	INTR_ID(addr), 	 inb(INTR_ID(addr)),

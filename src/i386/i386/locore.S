@@ -33,10 +33,67 @@
 #include <i386/proc_reg.h>
 #include <i386/trap.h>
 #include <i386/seg.h>
+#include <i386/gdt.h>
 #include <i386/ldt.h>
 #include <i386/i386asm.h>
 #include <i386/cpu_number.h>
 #include <i386/xen.h>
+
+/* finish filling i386_interrupt_state */
+#define PUSH_REGS_ISR	\
+	pushl	%ecx    ;\
+	pushl	%edx
+
+#define PUSH_AREGS_ISR	\
+	pushl	%eax    ;\
+	PUSH_REGS_ISR
+
+
+#define POP_REGS_ISR	\
+	popl	%edx    ;\
+	popl	%ecx
+
+#define POP_AREGS_ISR	\
+	POP_REGS_ISR   ;\
+	popl	%eax
+
+/*
+ * Note that we have to load the kernel segment registers even if this
+ * is a trap from the kernel, because the kernel uses user segment
+ * registers for copyin/copyout.
+ * (XXX Would it be smarter just to use fs or gs for that?)
+ */
+#define PUSH_SEGMENTS	\
+	pushl	%ds		;\
+	pushl	%es		;\
+	pushl	%fs		;\
+	pushl	%gs
+
+#define POP_SEGMENTS	\
+	popl	%gs		;\
+	popl	%fs		;\
+	popl	%es		;\
+	popl	%ds
+
+#define PUSH_SEGMENTS_ISR	\
+	pushl	%ds		;\
+	pushl	%es		;\
+	pushl	%fs		;\
+	pushl	%gs
+
+#define POP_SEGMENTS_ISR	\
+	popl	%gs		;\
+	popl	%fs		;\
+	popl	%es		;\
+	popl	%ds
+
+#define SET_KERNEL_SEGMENTS(reg)	       \
+	mov	%ss,reg /* switch to kernel segments */ ;\
+	mov	reg,%ds	/* (same as kernel stack segment) */ ;\
+	mov	reg,%es			;\
+	mov	reg,%fs			;\
+	mov	$(PERCPU_DS),reg	;\
+	mov	reg,%gs
 
 /*
  * Fault recovery.
@@ -455,21 +512,8 @@ ENTRY(t_page_fault)
 ENTRY(alltraps)
 	pusha				/* save the general registers */
 trap_push_segs:
-	pushl	%ds			/* and the segment registers */
-	pushl	%es
-	pushl	%fs
-	pushl	%gs
-
-	/* Note that we have to load the segment registers
-	   even if this is a trap from the kernel,
-	   because the kernel uses user segment registers for copyin/copyout.
-	   (XXX Would it be smarter just to use fs or gs for that?)  */
-	mov	%ss,%ax			/* switch to kernel data segment */
-	mov	%ax,%ds			/* (same as kernel stack segment) */
-	mov	%ax,%es
-	mov	%ax,%fs
-	mov	%ax,%gs
-
+	PUSH_SEGMENTS			/* and the segment registers */
+	SET_KERNEL_SEGMENTS(%ax)	/* switch to kernel data segment */
 trap_set_segs:
 	cld				/* clear direction flag */
 	testl	$(EFL_VM),R_EFLAGS(%esp) /* in V86 mode? */
@@ -541,17 +585,18 @@ _kret_iret:
 trap_from_kernel:
 #if	MACH_KDB || MACH_TTD
 	movl	%esp,%ebx		/* save current stack */
-
 	movl	%esp,%edx		/* on an interrupt stack? */
-	and	$(~(KERNEL_STACK_SIZE-1)),%edx
-	cmpl	EXT(int_stack_base),%edx
+
+	CPU_NUMBER(%ecx)
+	and	$(~(INTSTACK_SIZE-1)),%edx
+	cmpl	CX(EXT(int_stack_base),%ecx),%edx
 	je	1f			/* OK if so */
 
-	CPU_NUMBER(%edx)		/* get CPU number */
+	movl	%ecx,%edx
 	cmpl	CX(EXT(kernel_stack),%edx),%esp
 					/* already on kernel stack? */
 	ja	0f
-	cmpl	CX(EXT(active_stacks),%edx),%esp
+	cmpl	MY(ACTIVE_STACK),%esp
 	ja	1f			/* switch if not */
 0:
 	movl	CX(EXT(kernel_stack),%edx),%esp
@@ -567,6 +612,7 @@ trap_from_kernel:
 	call	EXT(kernel_trap)	/* to kernel trap routine */
 	addl	$4,%esp			/* pop parameter */
 #endif	/* MACH_KDB || MACH_TTD */
+
 	jmp	_return_from_kernel
 
 
@@ -607,6 +653,7 @@ ENTRY(call_continuation)
 	jmp	*%eax				/* goto continuation */
 
 
+/* IOAPIC has 24 interrupts, put spurious in the same array */
 
 #define INTERRUPT(n)				\
 	.data	2				;\
@@ -621,6 +668,7 @@ ENTRY(call_continuation)
 	.data	2
 DATA(int_entry_table)
 	.text
+/* Legacy APIC interrupts or PIC interrupts */
 INTERRUPT(0)
 INTERRUPT(1)
 INTERRUPT(2)
@@ -637,6 +685,68 @@ INTERRUPT(12)
 INTERRUPT(13)
 INTERRUPT(14)
 INTERRUPT(15)
+#ifdef APIC
+/* APIC PCI interrupts PIRQ A-H */
+INTERRUPT(16)
+INTERRUPT(17)
+INTERRUPT(18)
+INTERRUPT(19)
+INTERRUPT(20)
+INTERRUPT(21)
+INTERRUPT(22)
+INTERRUPT(23)
+/* Possibly 8 more GSIs */
+INTERRUPT(24)
+INTERRUPT(25)
+INTERRUPT(26)
+INTERRUPT(27)
+INTERRUPT(28)
+INTERRUPT(29)
+INTERRUPT(30)
+INTERRUPT(31)
+/* ... APIC IOAPIC #2 */
+INTERRUPT(32)
+INTERRUPT(33)
+INTERRUPT(34)
+INTERRUPT(35)
+INTERRUPT(36)
+INTERRUPT(37)
+INTERRUPT(38)
+INTERRUPT(39)
+INTERRUPT(40)
+INTERRUPT(41)
+INTERRUPT(42)
+INTERRUPT(43)
+INTERRUPT(44)
+INTERRUPT(45)
+INTERRUPT(46)
+INTERRUPT(47)
+INTERRUPT(48)
+INTERRUPT(49)
+INTERRUPT(50)
+INTERRUPT(51)
+INTERRUPT(52)
+INTERRUPT(53)
+INTERRUPT(54)
+INTERRUPT(55)
+/* Possibly 8 more GSIs */
+INTERRUPT(56)
+INTERRUPT(57)
+INTERRUPT(58)
+INTERRUPT(59)
+INTERRUPT(60)
+INTERRUPT(61)
+INTERRUPT(62)
+INTERRUPT(63)
+#endif
+#if NCPUS > 1
+INTERRUPT(CALL_AST_CHECK)
+INTERRUPT(CALL_PMAP_UPDATE)
+#endif
+#ifdef APIC
+/* Spurious interrupt, set irq number to vect number */
+INTERRUPT(255)
+#endif
 
 /* XXX handle NMI - at least print a warning like Linux does.  */
 
@@ -645,28 +755,22 @@ INTERRUPT(15)
  * old %eax on stack; interrupt number in %eax.
  */
 ENTRY(all_intrs)
-	pushl	%ecx			/* save registers */
-	pushl	%edx
+	PUSH_REGS_ISR			/* save registers */
 	cld				/* clear direction flag */
 
+	CPU_NUMBER_NO_GS(%ecx)
 	movl	%esp,%edx		/* on an interrupt stack? */
-	and	$(~(KERNEL_STACK_SIZE-1)),%edx
-	cmpl	%ss:EXT(int_stack_base),%edx
+	and	$(~(INTSTACK_SIZE-1)),%edx
+	cmpl	%ss:CX(EXT(int_stack_base),%ecx),%edx
 	je	int_from_intstack	/* if not: */
 
-	pushl	%ds			/* save segment registers */
-	pushl	%es
-	pushl	%fs
-	pushl	%gs
-	mov	%ss,%dx			/* switch to kernel segments */
-	mov	%dx,%ds
-	mov	%dx,%es
-	mov	%dx,%fs
-	mov	%dx,%gs
+	PUSH_SEGMENTS_ISR		/* save segment registers */
+	SET_KERNEL_SEGMENTS(%dx)	/* switch to kernel segments */
 
 	CPU_NUMBER(%edx)
 
 	movl	CX(EXT(int_stack_top),%edx),%ecx
+
 	xchgl	%ecx,%esp		/* switch to interrupt stack */
 
 #if	STAT_TIME
@@ -678,12 +782,19 @@ ENTRY(all_intrs)
 	TIME_INT_ENTRY			/* do timing */
 #endif
 
-	call	EXT(interrupt)		/* call generic interrupt routine */
+#ifdef MACH_LDEBUG
+	incl	CX(EXT(in_interrupt),%edx)
+#endif
 
-	.globl	EXT(return_to_iret)
-LEXT(return_to_iret)			/* ( label for kdb_kintr and hardclock) */
+	call	EXT(interrupt)		/* call generic interrupt routine */
+	.globl	EXT(return_to_iret)	/* ( label for kdb_kintr and hardclock */
+LEXT(return_to_iret)			/* to find the return from calling interrupt) */
 
 	CPU_NUMBER(%edx)
+#ifdef MACH_LDEBUG
+	decl	CX(EXT(in_interrupt),%edx)
+#endif
+
 #if	STAT_TIME
 #else
 	TIME_INT_EXIT			/* do timing */
@@ -701,23 +812,21 @@ LEXT(return_to_iret)			/* ( label for kdb_kintr and hardclock) */
 	cmpl	$0,CX(EXT(need_ast),%edx)
 	jnz	ast_from_interrupt	/* take it if so */
 1:
-	pop	%gs			/* restore segment regs */
-	pop	%fs
-	pop	%es
-	pop	%ds
-	pop	%edx
-	pop	%ecx
-	pop	%eax
+	POP_SEGMENTS_ISR		/* restore segment regs */
+	POP_AREGS_ISR			/* restore registers */
+
 	iret				/* return to caller */
 
 int_from_intstack:
-	cmpl	EXT(int_stack_base),%esp	/* seemingly looping? */
+	CPU_NUMBER_NO_GS(%edx)
+	cmpl	CX(EXT(int_stack_base),%edx),%esp /* seemingly looping? */
 	jb	stack_overflowed	/* if not: */
 	call	EXT(interrupt)		/* call interrupt routine */
 _return_to_iret_i:			/* ( label for kdb_kintr) */
-	pop	%edx			/* must have been on kernel segs */
-	pop	%ecx
-	pop	%eax			/* no ASTs */
+					/* must have been on kernel segs */
+	POP_AREGS_ISR			/* restore registers */
+					/* no ASTs */
+
 	iret
 
 stack_overflowed:
@@ -740,26 +849,13 @@ stack_overflowed:
  *	ss
  */
 ast_from_interrupt:
-	pop	%gs			/* restore all registers ... */
-	pop	%fs
-	pop	%es
-	pop	%ds
-	popl	%edx
-	popl	%ecx
-	popl	%eax
+	POP_SEGMENTS_ISR		/* restore all registers ... */
+	POP_AREGS_ISR
 	pushl	$0			/* zero code */
 	pushl	$0			/* zero trap number */
 	pusha				/* save general registers */
-	push	%ds			/* save segment registers */
-	push	%es
-	push	%fs
-	push	%gs
-	mov	%ss,%dx			/* switch to kernel segments */
-	mov	%dx,%ds
-	mov	%dx,%es
-	mov	%dx,%fs
-	mov	%dx,%gs
-
+	PUSH_SEGMENTS_ISR		/* save segment registers */
+	SET_KERNEL_SEGMENTS(%dx)	/* switch to kernel segments */
 	CPU_NUMBER(%edx)
 	TIME_TRAP_UENTRY
 
@@ -778,9 +874,12 @@ ast_from_interrupt:
  * frame->	saved %ebp
  *		return address in interrupt handler
  * #ifndef MACH_XEN
- *		iunit
+ *		1st parameter iunit
+ *		2nd parameter saved SPL
+ *		3th parameter return address
+ *		4th parameter registers
  *		saved SPL
- *		irq
+ *		saved IRQ
  * #endif
  *		return address == return_to_iret_i
  *		saved %edx
@@ -819,7 +918,7 @@ ast_from_interrupt:
 #ifdef	MACH_XEN
 #define	RET_OFFSET	8
 #else	/* MACH_XEN */
-#define	RET_OFFSET	20
+#define	RET_OFFSET	32
 #endif	/* MACH_XEN */
 
 ENTRY(kdb_kintr)
@@ -833,7 +932,9 @@ ENTRY(kdb_kintr)
 	cmpl	RET_OFFSET(%eax),%edx	/* interrupt handler (2)? */
 	je	2f			/* if not: */
 	movl	(%eax),%eax		/* try next frame */
-	jmp	0b
+	testl	%eax,%eax
+	jnz	0b
+	ud2				/* oops, didn't find frame, fix me :/ */
 
 1:	movl	$kdb_from_iret,RET_OFFSET(%eax)
 	ret				/* returns to kernel/user stack */
@@ -881,19 +982,13 @@ kdb_from_iret_i:			/* on interrupt stack */
 	pushl	$0			/* zero error code */
 	pushl	$0			/* zero trap number */
 	pusha				/* save general registers */
-	push	%ds			/* save segment registers */
-	push	%es
-	push	%fs
-	push	%gs
+	PUSH_SEGMENTS			/* save segment registers */
 	pushl	%esp			/* pass regs, */
 	pushl	$0			/* code, */
 	pushl	$-1			/* type to kdb */
 	call	EXT(kdb_trap)
 	addl	$12,%esp		/* remove parameters */
-	pop	%gs			/* restore segment registers */
-	pop	%fs
-	pop	%es
-	pop	%ds
+	POP_SEGMENTS			/* restore segment registers */
 	popa				/* restore general registers */
 	addl	$8,%esp
 	iret
@@ -963,19 +1058,13 @@ ttd_from_iret_i:			/* on interrupt stack */
 	pushl	$0			/* zero error code */
 	pushl	$0			/* zero trap number */
 	pusha				/* save general registers */
-	push	%ds			/* save segment registers */
-	push	%es
-	push	%fs
-	push	%gs
+	PUSH_SEGMENTS_ISR		/* save segment registers */
 	pushl	%esp			/* pass regs, */
 	pushl	$0			/* code, */
 	pushl	$-1			/* type to kdb */
 	call	_kttd_trap
 	addl	$12,%esp		/* remove parameters */
-	pop	%gs			/* restore segment registers */
-	pop	%fs
-	pop	%es
-	pop	%ds
+	POP_SEGMENTS_ISR		/* restore segment registers */
 	popa				/* restore general registers */
 	addl	$8,%esp
 	iret
@@ -1003,16 +1092,8 @@ syscall_entry_2:
 	pushl	$0			/* clear trap number slot */
 
 	pusha				/* save the general registers */
-	pushl	%ds			/* and the segment registers */
-	pushl	%es
-	pushl	%fs
-	pushl	%gs
-
-	mov	%ss,%dx			/* switch to kernel data segment */
-	mov	%dx,%ds
-	mov	%dx,%es
-	mov	%dx,%fs
-	mov	%dx,%gs
+	PUSH_SEGMENTS			/* and the segment registers */
+	SET_KERNEL_SEGMENTS(%dx)	/* switch to kernel data segment */
 
 /*
  * Shuffle eflags,eip,cs into proper places
@@ -1038,7 +1119,7 @@ syscall_entry_2:
  * Check for MACH or emulated system call
  */
 syscall_entry_3:
-	movl	CX(EXT(active_threads),%edx),%edx
+	movl	MY(ACTIVE_THREAD),%edx
 					/* point to current thread */
 	movl	TH_TASK(%edx),%edx	/* point to task */
 	movl	TASK_EMUL(%edx),%edx	/* get emulation vector */
@@ -1177,6 +1258,9 @@ syscall_addr:
 
 	.data
 DATA(cpu_features)
+DATA(cpu_features_edx)
+	.long	0
+DATA(cpu_features_ecx)
 	.long	0
 	.text
 
@@ -1226,7 +1310,8 @@ ENTRY(discover_x86_cpu_type)
 	   use it to find out what we are. */
 0:	movl	$1,%eax			/* Fetch CPU type info ... */
 	cpuid				/*  ... into eax */
-	movl	%edx,cpu_features	/* Keep a copy */
+	movl	%ecx,cpu_features_ecx	/* Keep a copy */
+	movl	%edx,cpu_features_edx	/* Keep a copy */
 	shrl	$8,%eax			/* Slide family bits down */
 	andl	$15,%eax		/* And select them */
 
@@ -1287,6 +1372,7 @@ copyin_fail:
  * arg0:	user address
  * arg1:	kernel address
  * arg2:	byte count - must be a multiple of four
+ * arg3:	kernel byte count
  */
 ENTRY(copyinmsg)
 	pushl	%esi
@@ -1295,6 +1381,7 @@ ENTRY(copyinmsg)
 	movl	8+S_ARG0,%esi		/* get user start address */
 	movl	8+S_ARG1,%edi		/* get kernel destination address */
 	movl	8+S_ARG2,%ecx		/* get count */
+	movl	%ecx,%edx		/* save count */
 
 	movl	$USER_DS,%eax		/* use user data segment for accesses */
 	mov	%ax,%ds
@@ -1305,6 +1392,9 @@ ENTRY(copyinmsg)
 	rep
 	movsl				/* move longwords */
 	xorl	%eax,%eax		/* return 0 for success */
+
+	movl	8+S_ARG1,%edi
+	movl	%edx,%es:MSGH_MSGH_SIZE(%edi)	/* set msgh_size */
 
 copyinmsg_ret:
 	mov	%ss,%di			/* restore DS to kernel segment */

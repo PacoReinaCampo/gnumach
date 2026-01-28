@@ -23,6 +23,7 @@
 #include <machine/xen.h>
 #include <machine/spl.h>
 #include <machine/ipl.h>
+#include <i386at/rtc.h>
 #include <mach/machine/eflags.h>
 #include <xen/evt.h>
 #include "xen.h"
@@ -123,17 +124,17 @@ readtodc(uint64_t *tp)
 }
 
 int
-writetodc()
+writetodc(void)
 {
 	/* Not allowed in Xen */
 	return(-1);
 }
 
 void
-clkstart()
+clkstart(void)
 {
 	evtchn_port_t port = hyp_event_channel_bind_virq(VIRQ_TIMER, 0);
-	hyp_evt_handler(port, hypclock_intr, 0, SPLHI);
+	hyp_evt_handler(port, (interrupt_handler_fn)hypclock_intr, 0, SPLHI);
 
 	/* first clock tick */
 	clock_interrupt(0, 0, 0, 0);
@@ -141,4 +142,16 @@ clkstart()
 
 	/* 10ms tick rest */
 	hyp_do_set_timer_op(hyp_get_stime()+10*1000*1000);
+}
+
+uint32_t
+hpclock_read_counter(void)
+{
+	return hyp_get_stime();
+}
+
+uint32_t
+hpclock_get_counter_period_nsec(void)
+{
+	return 1;
 }

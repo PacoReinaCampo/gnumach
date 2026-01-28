@@ -37,7 +37,6 @@
 #include <ddb/db_output.h>
 #include <ddb/db_sym.h>
 #include <ddb/db_task_thread.h>
-#include <ddb/db_aout.h>
 #include <ddb/db_elf.h>
 
 #include <vm/vm_map.h>	/* vm_map_t */
@@ -60,7 +59,7 @@ db_add_symbol_table(
 	int  type,
 	char *start,
 	char *end,
-	char *name,
+	const char *name,
 	char *ref,
 	char *map_pointer)
 {
@@ -91,9 +90,7 @@ db_add_symbol_table(
  *  overwritten by each call... but in practice this seems okay.
  */
 static char * __attribute__ ((pure))
-db_qualify(symname, symtabname)
-	const char	*symname;
-	const char	*symtabname;
+db_qualify(const char *symname, const char *symtabname)
 {
 	static char     tmp[256];
 	char		*s;
@@ -194,7 +191,7 @@ db_lookup(char *symstr)
  */
 db_sym_t
 db_sym_parse_and_lookup(
-	db_sym_t	(*func)(),
+	db_sym_t	(*func) (db_symtab_t *, const char*, const char*, int),
 	db_symtab_t	*symtab,
 	char		*symstr)
 {
@@ -264,7 +261,7 @@ out:
  */
 boolean_t db_qualify_ambiguous_names = FALSE;
 
-boolean_t
+static boolean_t
 db_name_is_ambiguous(char *sym_name)
 {
 	int		i;
@@ -443,10 +440,10 @@ db_symbol_values(
 unsigned long	db_maxoff = 0x4000;
 
 void
-db_task_printsym(off, strategy, task)
-	db_addr_t	off;
-	db_strategy_t	strategy;
-	task_t		task;
+db_task_printsym(
+	db_addr_t	off,
+	db_strategy_t	strategy,
+	task_t		task)
 {
 	db_addr_t	d;
 	char 		*filename;
@@ -477,19 +474,19 @@ db_task_printsym(off, strategy, task)
 }
 
 void
-db_printsym(off, strategy)
-	db_expr_t	off;
-	db_strategy_t	strategy;
+db_printsym(
+	db_expr_t	off,
+	db_strategy_t	strategy)
 {
 	db_task_printsym(off, strategy, TASK_NULL);
 }
 
 boolean_t
-db_line_at_pc( sym, filename, linenum, pc)
-	db_sym_t	sym;
-	char		**filename;
-	int		*linenum;
-	db_addr_t	pc;
+db_line_at_pc(
+	db_sym_t	sym,
+	char		**filename,
+	int		*linenum,
+	db_addr_t	pc)
 {
 	return (db_last_symtab) ?
 		X_db_line_at_pc( db_last_symtab, sym, filename, linenum, pc) :
@@ -507,21 +504,16 @@ void db_free_symbol(db_sym_t s)
  * Switch into symbol-table specific routines
  */
 
-void dummy_db_free_symbol(db_sym_t symbol) { }
-boolean_t dummy_db_sym_init(char *a, char *b, char *c, char *d) {
+static void dummy_db_free_symbol(db_sym_t symbol) { }
+static boolean_t dummy_db_sym_init(char *a, char *b, const char *c, char *d) {
   return FALSE;
 }
 
 
 struct db_sym_switch x_db[] = {
 
-	/* BSD a.out format (really, sdb/dbx(1) symtabs) */
-#ifdef	DB_NO_AOUT
+	/* BSD a.out format (really, sdb/dbx(1) symtabs) not supported */
 	{ 0,},
-#else	/* DB_NO_AOUT */
-	{ aout_db_sym_init, aout_db_lookup, aout_db_search_symbol,
-	  aout_db_line_at_pc, aout_db_symbol_values, dummy_db_free_symbol },
-#endif	/* DB_NO_AOUT */
 
 	{ 0,},
 

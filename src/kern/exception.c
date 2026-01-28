@@ -45,6 +45,7 @@
 #include <kern/task.h>
 #include <kern/thread.h>
 #include <kern/processor.h>
+#include <kern/printf.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
 #include <kern/exception.h>
@@ -84,9 +85,9 @@ boolean_t debug_user_with_kdb = FALSE;
 
 void
 exception(
-	integer_t _exception, 
-	integer_t code, 
-	integer_t subcode)
+	integer_t _exception,
+	integer_t code,
+	long_integer_t subcode)
 {
 	ipc_thread_t self = current_thread();
 	ipc_port_t exc_port;
@@ -156,9 +157,9 @@ exception(
 
 void
 exception_try_task(
-	integer_t _exception, 
-	integer_t code, 
-	integer_t subcode)
+	integer_t _exception,
+	integer_t code,
+	long_integer_t subcode)
 {
 	ipc_thread_t self = current_thread();
 	task_t task = self->task;
@@ -276,31 +277,47 @@ struct mach_exception {
 	mach_msg_type_t		codeType;
 	integer_t		code;
 	mach_msg_type_t		subcodeType;
-	integer_t		subcode;
+	rpc_long_integer_t	subcode;
 };
 
 #define	INTEGER_T_SIZE_IN_BITS	(8 * sizeof(integer_t))
 #define	INTEGER_T_TYPE		MACH_MSG_TYPE_INTEGER_T
+#define RPC_LONG_INTEGER_T_SIZE_IN_BITS	(8 * sizeof(rpc_long_integer_t))
+#if defined(__LP64__) && !defined(USER32)
+#define RPC_LONG_INTEGER_T_TYPE	MACH_MSG_TYPE_INTEGER_64
+#else
+#define RPC_LONG_INTEGER_T_TYPE	MACH_MSG_TYPE_INTEGER_32
+#endif
 					/* in mach/machine/vm_types.h */
 
 mach_msg_type_t exc_port_proto = {
-	/* msgt_name = */		MACH_MSG_TYPE_PORT_SEND,
-	/* msgt_size = */		PORT_T_SIZE_IN_BITS,
-	/* msgt_number = */		1,
-	/* msgt_inline = */		TRUE,
-	/* msgt_longform = */		FALSE,
-	/* msgt_deallocate = */		FALSE,
-	/* msgt_unused = */		0
+	.msgt_name = MACH_MSG_TYPE_PORT_SEND,
+	.msgt_size = PORT_T_SIZE_IN_BITS,
+	.msgt_number = 1,
+	.msgt_inline = TRUE,
+	.msgt_longform = FALSE,
+	.msgt_deallocate = FALSE,
+	.msgt_unused = 0
 };
 
 mach_msg_type_t exc_code_proto = {
-	/* msgt_name = */		INTEGER_T_TYPE,
-	/* msgt_size = */		INTEGER_T_SIZE_IN_BITS,
-	/* msgt_number = */		1,
-	/* msgt_inline = */		TRUE,
-	/* msgt_longform = */		FALSE,
-	/* msgt_deallocate = */		FALSE,
-	/* msgt_unused = */		0
+	.msgt_name = INTEGER_T_TYPE,
+	.msgt_size = INTEGER_T_SIZE_IN_BITS,
+	.msgt_number = 1,
+	.msgt_inline = TRUE,
+	.msgt_longform = FALSE,
+	.msgt_deallocate = FALSE,
+	.msgt_unused = 0
+};
+
+mach_msg_type_t exc_subcode_proto = {
+	.msgt_name = RPC_LONG_INTEGER_T_TYPE,
+	.msgt_size = RPC_LONG_INTEGER_T_SIZE_IN_BITS,
+	.msgt_number = 1,
+	.msgt_inline = TRUE,
+	.msgt_longform = FALSE,
+	.msgt_deallocate = FALSE,
+	.msgt_unused = 0
 };
 
 /*
@@ -328,9 +345,9 @@ exception_raise(
 	ipc_port_t 	dest_port,
 	ipc_port_t 	thread_port,
 	ipc_port_t 	task_port,
-	integer_t 	_exception, 
-	integer_t 	code, 
-	integer_t 	subcode)
+	integer_t 	_exception,
+	integer_t 	code,
+	long_integer_t 	subcode)
 {
 	ipc_thread_t self = current_thread();
 	ipc_thread_t receiver;
@@ -349,16 +366,9 @@ exception_raise(
 	 *	and it will give the buffer back with its reply.
 	 */
 
-	kmsg = ikm_cache();
-	if (kmsg != IKM_NULL) {
-		ikm_cache() = IKM_NULL;
-		ikm_check_initialized(kmsg, IKM_SAVED_KMSG_SIZE);
-	} else {
-		kmsg = ikm_alloc(IKM_SAVED_MSG_SIZE);
-		if (kmsg == IKM_NULL)
-			panic("exception_raise");
-		ikm_init(kmsg, IKM_SAVED_MSG_SIZE);
-	}
+	kmsg = ikm_cache_alloc();
+	if (kmsg == IKM_NULL)
+		panic("exception_raise");
 
 	/*
 	 *	We need a reply port for the RPC.
@@ -448,9 +458,8 @@ exception_raise(
 
 	receiver = ipc_thread_queue_first(&dest_mqueue->imq_threads);
 	if ((receiver == ITH_NULL) ||
-	    !((receiver->swap_func == (void (*)()) mach_msg_continue) ||
-	      ((receiver->swap_func ==
-				(void (*)()) mach_msg_receive_continue) &&
+	    !((receiver->swap_func == mach_msg_continue) ||
+	      ((receiver->swap_func == mach_msg_receive_continue) &&
 	       (sizeof(struct mach_exception) <= receiver->ith_msize) &&
 	       ((receiver->ith_option & MACH_RCV_NOTIFY) == 0))) ||
 	    !thread_handoff(self, exception_raise_continue, receiver)) {
@@ -521,7 +530,7 @@ exception_raise(
 	exc->exception = _exception;
 	exc->codeType = exc_code_proto;
 	exc->code = code;
-	exc->subcodeType = exc_code_proto;
+	exc->subcodeType = exc_subcode_proto;
 	exc->subcode = subcode;
 
 	/*
@@ -606,10 +615,12 @@ exception_raise(
     {
 	kern_return_t kr;
 	ipc_entry_t entry;
+	mach_port_name_t port_name;
 
-	kr = ipc_entry_get (space, &exc->Head.msgh_remote_port, &entry);
+	kr = ipc_entry_get (space, &port_name, &entry);
 	if (kr)
 		goto abort_copyout;
+	exc->Head.msgh_remote_port = (mach_port_t) port_name;
     {
 	mach_port_gen_t gen;
 
@@ -656,10 +667,10 @@ exception_raise(
 	 *	to handle the two ports in the body.
 	 */
 
-	mr = (ipc_kmsg_copyout_object(space, (ipc_object_t) thread_port,
-				      MACH_MSG_TYPE_PORT_SEND, &exc->thread) |
-	      ipc_kmsg_copyout_object(space, (ipc_object_t) task_port,
-				      MACH_MSG_TYPE_PORT_SEND, &exc->task));
+	mr = (ipc_kmsg_copyout_object_to_port(space, (ipc_object_t) thread_port,
+                                              MACH_MSG_TYPE_PORT_SEND, &exc->thread) |
+	      ipc_kmsg_copyout_object_to_port(space, (ipc_object_t) task_port,
+                                              MACH_MSG_TYPE_PORT_SEND, &exc->task));
 	if (mr != MACH_MSG_SUCCESS) {
 		(void) ipc_kmsg_put(receiver->ith_msg, kmsg,
 				    kmsg->ikm_header.msgh_size);
@@ -677,15 +688,20 @@ exception_raise(
 	assert(kmsg->ikm_size == IKM_SAVED_KMSG_SIZE);
 
 	if (copyoutmsg(&kmsg->ikm_header, receiver->ith_msg,
-		       sizeof(struct mach_exception)) ||
-	    (ikm_cache() != IKM_NULL)) {
+		       sizeof(struct mach_exception))) {
 		mr = ipc_kmsg_put(receiver->ith_msg, kmsg,
 				  kmsg->ikm_header.msgh_size);
 		thread_syscall_return(mr);
 		/*NOTREACHED*/
 	}
 
-	ikm_cache() = kmsg;
+	if (!ikm_cache_free_try(kmsg)) {
+		mr = ipc_kmsg_put(receiver->ith_msg, kmsg,
+				  kmsg->ikm_header.msgh_size);
+		thread_syscall_return(mr);
+		/*NOTREACHED*/
+	}
+
 	thread_syscall_return(MACH_MSG_SUCCESS);
 	/*NOTREACHED*/
 #ifndef	__GNUC__
@@ -723,7 +739,7 @@ exception_raise(
 	exc->exception = _exception;
 	exc->codeType = exc_code_proto;
 	exc->code = code;
-	exc->subcodeType = exc_code_proto;
+	exc->subcodeType = exc_subcode_proto;
 	exc->subcode = subcode;
 
 	ipc_mqueue_send_always(kmsg);
@@ -762,13 +778,13 @@ exception_raise(
 
 /* Type descriptor for the return code.  */
 mach_msg_type_t exc_RetCode_proto = {
-	/* msgt_name = */		MACH_MSG_TYPE_INTEGER_32,
-	/* msgt_size = */		32,
-	/* msgt_number = */		1,
-	/* msgt_inline = */		TRUE,
-	/* msgt_longform = */		FALSE,
-	/* msgt_deallocate = */		FALSE,
-	/* msgt_unused = */		0
+	.msgt_name = MACH_MSG_TYPE_INTEGER_32,
+	.msgt_size = 32,
+	.msgt_number = 1,
+	.msgt_inline = TRUE,
+	.msgt_longform = FALSE,
+	.msgt_deallocate = FALSE,
+	.msgt_unused = 0
 };
 
 /*
@@ -805,11 +821,7 @@ exception_parse_reply(ipc_kmsg_t kmsg)
 
 	kr = msg->RetCode;
 
-	if ((kmsg->ikm_size == IKM_SAVED_KMSG_SIZE) &&
-	    (ikm_cache() == IKM_NULL))
-		ikm_cache() = kmsg;
-	else
-		ikm_free(kmsg);
+	ikm_cache_free(kmsg);
 
 	return kr;
 }

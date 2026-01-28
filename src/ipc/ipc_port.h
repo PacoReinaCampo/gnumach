@@ -50,7 +50,6 @@
 #include <ipc/ipc_thread.h>
 #include <ipc/ipc_object.h>
 #include "ipc_target.h"
-#include <mach/rpc.h>
 
 /*
  *  A receive right (port) can be in four states:
@@ -97,7 +96,7 @@ struct ipc_port {
 	mach_port_msgcount_t ip_msgcount;
 	mach_port_msgcount_t ip_qlimit;
 	struct ipc_thread_queue ip_blocked;
-	unsigned long ip_protected_payload;
+	rpc_uintptr_t ip_protected_payload;
 };
 
 #define ip_object		ip_target.ipt_object
@@ -137,7 +136,7 @@ typedef struct ipc_port_request {
 	} notify;
 
 	union {
-		mach_port_t name;
+		mach_port_name_t name;
 		struct ipc_table_size *size;
 	} name;
 } *ipc_port_request_t;
@@ -208,14 +207,14 @@ ipc_port_timestamp(void);
 				     (ipc_object_t *) (portp))
 
 extern kern_return_t
-ipc_port_dnrequest(ipc_port_t, mach_port_t, ipc_port_t,
+ipc_port_dnrequest(ipc_port_t, mach_port_name_t, ipc_port_t,
 		   ipc_port_request_index_t *);
 
 extern kern_return_t
 ipc_port_dngrow(ipc_port_t);
 
 extern ipc_port_t
-ipc_port_dncancel(ipc_port_t, mach_port_t, ipc_port_request_index_t);
+ipc_port_dncancel(ipc_port_t, mach_port_name_t, ipc_port_request_index_t);
 
 #define	ipc_port_dnrename(port, index, oname, nname)			\
 MACRO_BEGIN								\
@@ -264,7 +263,7 @@ extern void
 ipc_port_set_seqno(ipc_port_t, mach_port_seqno_t);
 
 extern void
-ipc_port_set_protected_payload(ipc_port_t, unsigned long);
+ipc_port_set_protected_payload(ipc_port_t, rpc_uintptr_t);
 
 extern void
 ipc_port_clear_protected_payload(ipc_port_t);
@@ -273,13 +272,13 @@ extern void
 ipc_port_clear_receiver(ipc_port_t);
 
 extern void
-ipc_port_init(ipc_port_t, ipc_space_t, mach_port_t);
+ipc_port_init(ipc_port_t, ipc_space_t, mach_port_name_t);
 
 extern kern_return_t
-ipc_port_alloc(ipc_space_t, mach_port_t *, ipc_port_t *);
+ipc_port_alloc(ipc_space_t, mach_port_name_t *, ipc_port_t *);
 
 extern kern_return_t
-ipc_port_alloc_name(ipc_space_t, mach_port_t, ipc_port_t *);
+ipc_port_alloc_name(ipc_space_t, mach_port_name_t, ipc_port_t *);
 
 extern void
 ipc_port_destroy(ipc_port_t);
@@ -288,7 +287,7 @@ extern boolean_t
 ipc_port_check_circularity(ipc_port_t, ipc_port_t);
 
 extern ipc_port_t
-ipc_port_lookup_notify(ipc_space_t, mach_port_t);
+ipc_port_lookup_notify(ipc_space_t, mach_port_name_t);
 
 extern ipc_port_t
 ipc_port_make_send(ipc_port_t);
@@ -296,7 +295,7 @@ ipc_port_make_send(ipc_port_t);
 extern ipc_port_t
 ipc_port_copy_send(ipc_port_t);
 
-extern mach_port_t
+extern mach_port_name_t
 ipc_port_copyout_send(ipc_port_t, ipc_space_t);
 
 extern void

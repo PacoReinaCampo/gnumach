@@ -39,7 +39,8 @@
 #include <machine/vm_param.h>
 #include <machine/pcb.h>
 #include <ipc/ipc_port.h>
-#include <ipc/mach_port.h>
+#include <ipc/mach_port.server.h>
+#include <kern/bootstrap.h>
 #include <kern/debug.h>
 #include <kern/host.h>
 #include <kern/printf.h>
@@ -70,15 +71,15 @@
 #include <mach/xen.h>
 extern struct start_info boot_info;	/* XXX put this in a header! */
 #else	/* MACH_XEN */
-extern struct multiboot_info boot_info;	/* XXX put this in a header! */
+extern struct multiboot_raw_info boot_info;	/* XXX put this in a header! */
 #endif	/* MACH_XEN */
 #endif
 
 #include "boot_script.h"
 
 
-static mach_port_t	boot_device_port;	/* local name */
-static mach_port_t	boot_host_port;		/* local name */
+static mach_port_name_t	boot_device_port;	/* local name */
+static mach_port_name_t	boot_host_port;		/* local name */
 
 extern char *kernel_cmdline;
 
@@ -87,12 +88,12 @@ static void user_bootstrap_compat(void);	/* forward */
 static void bootstrap_exec_compat(void *exec_data); /* forward */
 static void get_compat_strings(char *flags_str, char *root_str); /* forward */
 
-static mach_port_t
+static mach_port_name_t
 task_insert_send_right(
 	task_t task,
 	ipc_port_t port)
 {
-	mach_port_t name;
+	mach_port_name_t name;
 
 	for (name = 1;; name++) {
 		kern_return_t kr;
@@ -155,9 +156,25 @@ void bootstrap_create(void)
   boot_info.mods_count = n;
   boot_info.flags |= MULTIBOOT_MODS;
 #else	/* MACH_XEN */
+#ifdef __x86_64__
+  struct multiboot_raw_module *bmods32 = ((struct multiboot_raw_module *)
+                                          phystokv(boot_info.mods_addr));
+  struct multiboot_module *bmods=NULL;
+  if (bmods32)
+    {
+      int i;
+      bmods = alloca(boot_info.mods_count * sizeof(*bmods));
+      for (i=0; i<boot_info.mods_count; i++)
+        {
+          bmods[i].mod_start = bmods32[i].mod_start;
+          bmods[i].mod_end = bmods32[i].mod_end;
+          bmods[i].string = bmods32[i].string;
+        }
+    }
+#else
   struct multiboot_module *bmods = ((struct multiboot_module *)
 				    phystokv(boot_info.mods_addr));
-
+#endif
 #endif	/* MACH_XEN */
   if (!(boot_info.flags & MULTIBOOT_MODS)
       || (boot_info.mods_count == 0))
@@ -318,7 +335,9 @@ bootstrap_exec_compat(void *e)
 	 */
 
 	(void) task_create(TASK_NULL, FALSE, &bootstrap_task);
+	(void) task_set_name(bootstrap_task, "bootstrap");
 	(void) thread_create(bootstrap_task, &bootstrap_thread);
+	(void) thread_set_name(bootstrap_thread, "bootstrap");
 
 	/*
 	 * Insert send rights to the master host and device ports.
@@ -562,15 +581,15 @@ build_args_and_stack(struct exec_info *boot_exec_info,
 	vm_offset_t	stack_base;
 	vm_size_t	stack_size;
 	char *		arg_ptr;
-	int		arg_count, envc;
+	long		arg_count, envc;
 	int		arg_len;
 	char *		arg_pos;
 	int		arg_item_len;
 	char *		string_pos;
-	char *		zero = (char *)0;
+	rpc_vm_offset_t	zero = 0;
 	int i;
 
-#define	STACK_SIZE	(64*1024)
+#define	STACK_SIZE	(2*64*1024)
 
 	/*
 	 * Calculate the size of the argument list.
@@ -593,21 +612,20 @@ build_args_and_stack(struct exec_info *boot_exec_info,
 	 *	trailing 0 pointer
 	 *	pointers to environment variables
 	 *	trailing 0 pointer
-	 *	and align to integer boundary
 	 */
-	arg_len += (sizeof(integer_t)
-		    + (arg_count + 1 + envc + 1) * sizeof(char *));
-	arg_len = (arg_len + sizeof(integer_t) - 1) & ~(sizeof(integer_t)-1);
+	arg_len += (sizeof(rpc_vm_offset_t)
+		    + (arg_count + 1 + envc + 1) * sizeof(rpc_vm_offset_t));
 
 	/*
 	 * Allocate the stack.
 	 */
 	stack_size = round_page(STACK_SIZE);
 	stack_base = user_stack_low(stack_size);
-	(void) vm_allocate(current_task()->map,
-			&stack_base,
-			stack_size,
-			FALSE);
+
+	(void) vm_map(current_map(), &stack_base, stack_size,
+		      0, FALSE, IP_NULL, 0, FALSE,
+		      boot_exec_info->stack_prot, VM_PROT_ALL,
+		      VM_INHERIT_DEFAULT);
 
 	arg_pos = (char *)
 		set_user_regs(stack_base, stack_size, boot_exec_info, arg_len);
@@ -616,29 +634,28 @@ build_args_and_stack(struct exec_info *boot_exec_info,
 	 * Start the strings after the arg-count and pointers
 	 */
 	string_pos = (arg_pos
-		      + sizeof(integer_t)
-		      + (arg_count + 1 + envc + 1) * sizeof(char *));
+		      + sizeof(rpc_vm_offset_t)
+		      + (arg_count + 1 + envc + 1) * sizeof(rpc_vm_offset_t));
 
 	/*
 	 * first the argument count
 	 */
 	(void) copyout(&arg_count,
 			arg_pos,
-			sizeof(integer_t));
-	arg_pos += sizeof(integer_t);
+			sizeof(rpc_vm_offset_t));
+	arg_pos += sizeof(rpc_vm_offset_t);
 
 	/*
 	 * Then the strings and string pointers for each argument
 	 */
 	for (i = 0; i < arg_count; ++i) {
+	    rpc_vm_offset_t pos = convert_vm_to_user((vm_offset_t) string_pos);
 	    arg_ptr = argv[i];
 	    arg_item_len = strlen(arg_ptr) + 1; /* include trailing 0 */
 
 	    /* set string pointer */
-	    (void) copyout(&string_pos,
-			arg_pos,
-			sizeof (char *));
-	    arg_pos += sizeof(char *);
+            (void) copyout(&pos, arg_pos, sizeof (rpc_vm_offset_t));
+	    arg_pos += sizeof(rpc_vm_offset_t);
 
 	    /* copy string */
 	    (void) copyout(arg_ptr, string_pos, arg_item_len);
@@ -648,21 +665,20 @@ build_args_and_stack(struct exec_info *boot_exec_info,
 	/*
 	 * Null terminator for argv.
 	 */
-	(void) copyout(&zero, arg_pos, sizeof(char *));
-	arg_pos += sizeof(char *);
+	(void) copyout(&zero, arg_pos, sizeof(rpc_vm_offset_t));
+	arg_pos += sizeof(rpc_vm_offset_t);
 
 	/*
 	 * Then the strings and string pointers for each environment variable
 	 */
 	for (i = 0; i < envc; ++i) {
+	    rpc_vm_offset_t pos = convert_vm_to_user((vm_offset_t) string_pos);
 	    arg_ptr = envp[i];
 	    arg_item_len = strlen(arg_ptr) + 1; /* include trailing 0 */
 
 	    /* set string pointer */
-	    (void) copyout(&string_pos,
-			arg_pos,
-			sizeof (char *));
-	    arg_pos += sizeof(char *);
+            (void) copyout(&pos, arg_pos, sizeof (rpc_vm_offset_t));
+	    arg_pos += sizeof(rpc_vm_offset_t);
 
 	    /* copy string */
 	    (void) copyout(arg_ptr, string_pos, arg_item_len);
@@ -672,7 +688,7 @@ build_args_and_stack(struct exec_info *boot_exec_info,
 	/*
 	 * Null terminator for envp.
 	 */
-	(void) copyout(&zero, arg_pos, sizeof(char *));
+	(void) copyout(&zero, arg_pos, sizeof(rpc_vm_offset_t));
 }
 
 
@@ -888,7 +904,7 @@ boot_script_free_task (task_t task, int aborting)
 }
 
 int
-boot_script_insert_right (struct cmd *cmd, mach_port_t port, mach_port_t *name)
+boot_script_insert_right (struct cmd *cmd, mach_port_t port, mach_port_name_t *name)
 {
   *name = task_insert_send_right (cmd->task,
 				  ipc_port_make_send((ipc_port_t) port));
@@ -896,7 +912,7 @@ boot_script_insert_right (struct cmd *cmd, mach_port_t port, mach_port_t *name)
 }
 
 int
-boot_script_insert_task_port (struct cmd *cmd, task_t task, mach_port_t *name)
+boot_script_insert_task_port (struct cmd *cmd, task_t task, mach_port_name_t *name)
 {
   *name = task_insert_send_right (cmd->task,
 				  ipc_port_make_send(task->itk_sself));

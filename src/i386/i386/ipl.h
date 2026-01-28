@@ -71,10 +71,12 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 #ifdef	KERNEL
 #ifndef	__ASSEMBLER__
-#include <machine/machspl.h>
-extern void	(*ivect[])();
+#include <machine/spl.h>
+/* Note that interrupts have varying signatures */
+typedef void (*interrupt_handler_fn)(int);
+extern interrupt_handler_fn ivect[];
 extern int	iunit[];
-extern spl_t	curr_ipl;
+extern spl_t	curr_ipl[NCPUS];
 #endif	/* __ASSEMBLER__ */
 #endif	/* KERNEL */
 

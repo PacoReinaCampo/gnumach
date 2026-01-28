@@ -30,6 +30,7 @@
 #ifndef	_MACH_MACH_I386_TYPES_H_
 #define	_MACH_MACH_I386_TYPES_H_
 
+#ifndef __ASSEMBLER__
 /*
  * i386 segment descriptor.
  */
@@ -42,15 +43,15 @@ typedef struct descriptor descriptor_t;
 typedef	struct descriptor *descriptor_list_t;
 typedef        const struct descriptor *const_descriptor_list_t;
 
+#endif /* !__ASSEMBLER__ */
+
 /*
  * i386 I/O port
  */
 
-#ifdef MACH_KERNEL
-#include <i386/io_perm.h>
-#else /* MACH_KERNEL */
+#ifndef MACH_KERNEL
 typedef unsigned short io_port_t;
 typedef mach_port_t io_perm_t;
-#endif /* MACH_KERNEL */
+#endif /* !MACH_KERNEL */
 
 #endif	/* _MACH_MACH_I386_TYPES_H_ */

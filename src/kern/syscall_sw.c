@@ -38,7 +38,7 @@
 #include <kern/syscall_subr.h>
 #include <kern/ipc_mig.h>
 #include <kern/eventcount.h>
-#include <ipc/mach_port.h>
+#include <ipc/mach_port.server.h>
 
 
 /*
@@ -60,13 +60,13 @@
 
 boolean_t kern_invalid_debug = FALSE;
 
-mach_port_t	null_port(void)
+static mach_port_name_t	null_port(void)
 {
 	if (kern_invalid_debug) SoftDebugger("null_port mach trap");
 	return(MACH_PORT_NULL);
 }
 
-kern_return_t	kern_invalid(void)
+static kern_return_t	kern_invalid(void)
 {
 	if (kern_invalid_debug) SoftDebugger("kern_invalid mach trap");
 	return(KERN_INVALID_ARGUMENT);
@@ -160,7 +160,7 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(syscall_mach_port_insert_right, 4),	/* 74 */
 	MACH_TRAP(syscall_mach_port_allocate_name, 3),	/* 75 */
 	MACH_TRAP(syscall_thread_depress_abort, 1),	/* 76 */
-	MACH_TRAP(kern_invalid, 0),		/* 77 */
+	MACH_TRAP(thread_set_self_state, 3),		/* 77 */
 	MACH_TRAP(kern_invalid, 0),		/* 78 */
 	MACH_TRAP(kern_invalid, 0),		/* 79 */
 

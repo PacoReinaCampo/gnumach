@@ -38,14 +38,10 @@
 
 /*
  * A natural_t is the type for the native
- * integer type, e.g. 32 or 64 or.. whatever
- * register size the machine has.  Unsigned, it is
- * used for entities that might be either
- * unsigned integers or pointers, and for
- * type-casting between the two.
- * For instance, the IPC system represents
- * a port in user space as an integer and
- * in kernel space as a pointer.
+ * unsigned integer type, usually 32 bits. It is suitable for
+ * most counters with a small chance of overflow.
+ * While historically natural_t was meant to be the same
+ * as a pointer, that is not the case here.
  */
 type natural_t = uint32_t;
 
@@ -59,8 +55,53 @@ type natural_t = uint32_t;
 type integer_t = int32_t;
 
 /*
+ * long_natural_t and long_integer_t for kernel <-> userland interfaces as the
+ * size depends on the architecture of both kernel and userland.
+ */
+#if defined(KERNEL_SERVER) && defined(USER32)
+type rpc_long_natural_t = uint32_t;
+type rpc_long_integer_t = int32_t;
+#else /* KERNEL and USER32 */
+#if defined(__x86_64__)
+type rpc_long_natural_t = uint64_t;
+type rpc_long_integer_t = int64_t;
+#else
+type rpc_long_natural_t = uint32_t;
+type rpc_long_integer_t = int32_t;
+#endif /* __x86_64__ */
+#endif /* KERNEL_SERVER and USER32 */
+
+/*
+ * A long_natural_t is a possibly larger unsigned integer type than natural_t.
+ * Should be used instead of natural_t when we want the data to be less subject
+ * to overflows.
+ */
+type long_natural_t = rpc_long_natural_t
+#if defined(KERNEL_SERVER)
+    intran: long_natural_t convert_long_natural_from_user(rpc_long_natural_t)
+    outtran: rpc_long_natural_t convert_long_natural_to_user(long_natural_t)
+#elif defined(KERNEL_USER)
+    ctype: rpc_long_natural_t
+#endif
+    ;
+
+/*
+ * Larger version of integer_t. Only used when we want to hold possibly larger
+ * values than what is possible with integer_t.
+ */
+type long_integer_t = rpc_long_integer_t
+#if defined(KERNEL_SERVER)
+    intran: long_integer_t convert_long_integer_from_user(rpc_long_integer_t)
+    outtran: rpc_long_integer_t convert_long_integer_to_user(long_integer_t)
+#elif defined(KERNEL_USER)
+    ctype: rpc_long_integer_t
+#endif
+    ;
+
+/*
  * Physical address size
  */
 type rpc_phys_addr_t = uint64_t;
+type rpc_phys_addr_array_t = array[] of rpc_phys_addr_t;
 
 #endif	/* _MACHINE_MACHINE_TYPES_DEFS_ */

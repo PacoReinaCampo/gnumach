@@ -31,6 +31,7 @@
 #include <kern/syscall_emulation.h>
 #include <kern/task.h>
 #include <kern/kalloc.h>
+#include <kern/mach.server.h>
 #include <vm/vm_kern.h>
 
 /* XXX */
@@ -94,8 +95,7 @@ void eml_task_reference(
  *	Cleans up after the emulation code when a process exits.
  */
  
-void eml_task_deallocate(task)
-	const task_t task;
+void eml_task_deallocate(const task_t task)
 {
 	eml_dispatch_t	eml;
 
@@ -116,7 +116,7 @@ void eml_task_deallocate(task)
  *   task_set_emulation_vector:  [Server Entry]
  *   set a list of emulated system calls for this task.
  */
-kern_return_t
+static kern_return_t
 task_set_emulation_vector_internal(
 	task_t 			task,
 	int			vector_start,

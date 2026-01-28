@@ -57,9 +57,9 @@
 #endif	/* MACH_KDB */
 
 
-decl_simple_lock_data(, ipc_port_multiple_lock_data)
+def_simple_lock_data(, ipc_port_multiple_lock_data)
 
-decl_simple_lock_data(, ipc_port_timestamp_lock_data)
+def_simple_lock_data(, ipc_port_timestamp_lock_data)
 ipc_port_timestamp_t ipc_port_timestamp_data;
 
 /*
@@ -96,7 +96,7 @@ ipc_port_timestamp(void)
 kern_return_t
 ipc_port_dnrequest(
 	ipc_port_t 			port,
-	mach_port_t 			name,
+	mach_port_name_t 		name,
 	ipc_port_t 			soright,
 	ipc_port_request_index_t 	*indexp)
 {
@@ -234,7 +234,7 @@ ipc_port_dngrow(ipc_port_t port)
 ipc_port_t
 ipc_port_dncancel(
 	ipc_port_t			port,
-	mach_port_t			name,
+	mach_port_name_t		name,
 	ipc_port_request_index_t	index)
 {
 	ipc_port_request_t ipr, table;
@@ -431,7 +431,7 @@ ipc_port_set_seqno(
  */
 
 void
-ipc_port_set_protected_payload(ipc_port_t port, unsigned long payload)
+ipc_port_set_protected_payload(ipc_port_t port, rpc_uintptr_t payload)
 {
 	ipc_mqueue_t mqueue;
 
@@ -506,9 +506,9 @@ ipc_port_clear_receiver(
 
 void
 ipc_port_init(
-	ipc_port_t	port,
-	ipc_space_t	space,
-	mach_port_t	name)
+	ipc_port_t		port,
+	ipc_space_t		space,
+	mach_port_name_t	name)
 {
 	/* port->ip_kobject doesn't have to be initialized */
 
@@ -553,11 +553,11 @@ ipc_port_init(
 kern_return_t
 ipc_port_alloc(
 	ipc_space_t	space,
-	mach_port_t	*namep,
+	mach_port_name_t	*namep,
 	ipc_port_t	*portp)
 {
 	ipc_port_t port;
-	mach_port_t name;
+	mach_port_name_t name;
 	kern_return_t kr;
 
 	kr = ipc_object_alloc(space, IOT_PORT,
@@ -593,7 +593,7 @@ ipc_port_alloc(
 kern_return_t
 ipc_port_alloc_name(
 	ipc_space_t	space,
-	mach_port_t	name,
+	mach_port_name_t	name,
 	ipc_port_t	*portp)
 {
 	ipc_port_t port;
@@ -734,7 +734,7 @@ ipc_port_destroy(
 
 		for (index = 1; index < size; index++) {
 			ipc_port_request_t ipr = &dnrequests[index];
-			mach_port_t name = ipr->ipr_name;
+			mach_port_name_t name = ipr->ipr_name;
 			ipc_port_t soright;
 
 			if (name == MACH_PORT_NULL)
@@ -911,7 +911,7 @@ ipc_port_check_circularity(
 ipc_port_t
 ipc_port_lookup_notify(
 	ipc_space_t	space,
-	mach_port_t	name)
+	mach_port_name_t	name)
 {
 	ipc_port_t port;
 	ipc_entry_t entry;
@@ -1008,12 +1008,12 @@ ipc_port_copy_send(
  *		Nothing locked.
  */
 
-mach_port_t
+mach_port_name_t
 ipc_port_copyout_send(
 	ipc_port_t	sright,
 	ipc_space_t	space)
 {
-	mach_port_t name;
+	mach_port_name_t name;
 
 	if (IP_VALID(sright)) {
 		kern_return_t kr;
@@ -1024,12 +1024,12 @@ ipc_port_copyout_send(
 			ipc_port_release_send(sright);
 
 			if (kr == KERN_INVALID_CAPABILITY)
-				name = MACH_PORT_DEAD;
+				name = MACH_PORT_NAME_DEAD;
 			else
-				name = MACH_PORT_NULL;
+				name = MACH_PORT_NAME_NULL;
 		}
 	} else
-		name = (mach_port_t) sright;
+            name = invalid_port_to_name((mach_port_t)sright);
 
 	return name;
 }
@@ -1197,7 +1197,7 @@ ipc_port_alloc_special(ipc_space_t space)
 	 *	the fast rpc path).
 	 */
 
-	ipc_port_init(port, space, (mach_port_t)port);
+	ipc_port_init(port, space, (mach_port_name_t)port);
 
 	return port;
 }
@@ -1249,8 +1249,7 @@ ipc_port_dealloc_special(
  */
 
 void
-ipc_port_print(port)
-	const ipc_port_t port;
+ipc_port_print(const ipc_port_t port)
 {
 	printf("port 0x%x\n", port);
 
@@ -1283,7 +1282,7 @@ ipc_port_print(port)
 	printf(", sndrs=0x%x", port->ip_blocked.ithq_base);
 	printf(", kobj=0x%x\n", port->ip_kobject);
 
-	iprintf("protected_payload=%p\n", (void *) port->ip_protected_payload);
+	iprintf("protected_payload=%p\n", (void *) (vm_offset_t) port->ip_protected_payload);
 
 	indent -= 2;
 }

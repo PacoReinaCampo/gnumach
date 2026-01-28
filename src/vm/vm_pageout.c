@@ -327,6 +327,7 @@ vm_pageout_page(
 	kern_return_t		rc;
 	boolean_t		precious_clean;
 
+	assert(vm_object_lock_taken(m->object));
 	assert(m->busy);
 
 	/*
@@ -412,7 +413,7 @@ vm_pageout_page(
  *	It returns with vm_page_queue_free_lock held.
  */
 
-boolean_t vm_pageout_scan(boolean_t *should_wait)
+static boolean_t vm_pageout_scan(boolean_t *should_wait)
 {
 	boolean_t done;
 

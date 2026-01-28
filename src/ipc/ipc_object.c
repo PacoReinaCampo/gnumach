@@ -106,7 +106,7 @@ ipc_object_release(
 kern_return_t
 ipc_object_translate(
 	ipc_space_t		space,
-	mach_port_t		name,
+	mach_port_name_t	name,
 	mach_port_right_t	right,
 	ipc_object_t		*objectp)
 {
@@ -150,7 +150,7 @@ ipc_object_translate(
 kern_return_t
 ipc_object_alloc_dead(
 	ipc_space_t	space,
-	mach_port_t	*namep)
+	mach_port_name_t	*namep)
 {
 	ipc_entry_t entry;
 	kern_return_t kr;
@@ -187,7 +187,7 @@ ipc_object_alloc_dead(
 kern_return_t
 ipc_object_alloc_dead_name(
 	ipc_space_t	space,
-	mach_port_t	name)
+	mach_port_name_t	name)
 {
 	ipc_entry_t entry;
 	kern_return_t kr;
@@ -231,7 +231,7 @@ ipc_object_alloc(
 	ipc_object_type_t	otype,
 	mach_port_type_t	type,
 	mach_port_urefs_t	urefs,
-	mach_port_t		*namep,
+	mach_port_name_t	*namep,
 	ipc_object_t		*objectp)
 {
 	ipc_object_t object;
@@ -298,7 +298,7 @@ ipc_object_alloc_name(
 	ipc_object_type_t	otype,
 	mach_port_type_t	type,
 	mach_port_urefs_t	urefs,
-	mach_port_t		name,
+	mach_port_name_t	name,
 	ipc_object_t		*objectp)
 {
 	ipc_object_t object;
@@ -405,7 +405,7 @@ ipc_object_copyin_type(
 kern_return_t
 ipc_object_copyin(
 	ipc_space_t		space,
-	mach_port_t		name,
+	mach_port_name_t	name,
 	mach_msg_type_name_t	msgt_name,
 	ipc_object_t		*objectp)
 {
@@ -608,9 +608,9 @@ ipc_object_copyout(
 	ipc_object_t		object,
 	mach_msg_type_name_t	msgt_name,
 	boolean_t		overflow,
-	mach_port_t		*namep)
+	mach_port_name_t	*namep)
 {
-	mach_port_t name;
+	mach_port_name_t name;
 	ipc_entry_t entry;
 	kern_return_t kr;
 
@@ -666,62 +666,6 @@ ipc_object_copyout(
 	return kr;
 }
 
-#if 0
-/* XXX same, but don't check for already-existing send rights */
-kern_return_t
-ipc_object_copyout_multiname(space, object, namep)
-	ipc_space_t space;
-	ipc_object_t object;
-	mach_port_t *namep;
-{
-	mach_port_t name;
-	ipc_entry_t entry;
-	kern_return_t kr;
-
-	assert(IO_VALID(object));
-	assert(io_otype(object) == IOT_PORT);
-
-	is_write_lock(space);
-
-	for (;;) {
-		if (!space->is_active) {
-			is_write_unlock(space);
-			return KERN_INVALID_TASK;
-		}
-
-		kr = ipc_entry_alloc(space, &name, &entry);
-		if (kr != KERN_SUCCESS) {
-			is_write_unlock(space);
-			return kr; /* space is unlocked */
-		}
-
-		assert(IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE);
-		assert(entry->ie_object == IO_NULL);
-
-		io_lock(object);
-		if (!io_active(object)) {
-			io_unlock(object);
-			ipc_entry_dealloc(space, name, entry);
-			is_write_unlock(space);
-			return KERN_INVALID_CAPABILITY;
-		}
-
-		entry->ie_object = object;
-		break;
-	}
-
-	/* space is write-locked and active, object is locked and active */
-
-	kr = ipc_right_copyout_multiname(space, name, entry, object);
-	/* object is unlocked */
-	is_write_unlock(space);
-
-	if (kr == KERN_SUCCESS)
-		*namep = name;
-	return kr;
-}
-#endif /* 0 */
-
 /*
  *	Routine:	ipc_object_copyout_name
  *	Purpose:
@@ -747,9 +691,9 @@ ipc_object_copyout_name(
 	ipc_object_t		object,
 	mach_msg_type_name_t	msgt_name,
 	boolean_t		overflow,
-	mach_port_t		name)
+	mach_port_name_t	name)
 {
-	mach_port_t oname;
+	mach_port_name_t oname;
 	ipc_entry_t oentry;
 	ipc_entry_t entry;
 	kern_return_t kr;
@@ -826,9 +770,9 @@ ipc_object_copyout_dest(
 	ipc_space_t		space,
 	ipc_object_t		object,
 	mach_msg_type_name_t	msgt_name,
-	mach_port_t		*namep)
+	mach_port_name_t	*namep)
 {
-	mach_port_t name;
+	mach_port_name_t name;
 
 	assert(IO_VALID(object));
 	assert(io_active(object));
@@ -860,7 +804,7 @@ ipc_object_copyout_dest(
 		if (port->ip_receiver == space)
 			name = port->ip_receiver_name;
 		else
-			name = MACH_PORT_NULL;
+			name = MACH_PORT_NAME_NULL;
 
 		ip_unlock(port);
 
@@ -895,7 +839,7 @@ ipc_object_copyout_dest(
 			ip_unlock(port);
 
 			ipc_notify_send_once(port);
-			name = MACH_PORT_NULL;
+			name = MACH_PORT_NAME_NULL;
 		}
 
 		break;
@@ -930,8 +874,8 @@ ipc_object_copyout_dest(
 kern_return_t
 ipc_object_rename(
 	ipc_space_t	space,
-	mach_port_t	oname,
-	mach_port_t	nname)
+	mach_port_name_t	oname,
+	mach_port_name_t	nname)
 {
 	ipc_entry_t oentry, nentry;
 	kern_return_t kr;
@@ -1000,6 +944,7 @@ char *ikot_print_array[IKOT_MAX_TYPE] = {
 	"(CLOCK)            ",
 	"(CLOCK_CTRL)       ",
 	"(PAGER_PROXY)      ",	/* 27 */
+	"(USER_DEVICE)      ",	/* 28 */
 				/* << new entries here	*/
 	"(UNKNOWN)     "	/* magic catchall	*/
 };	/* Please keep in sync with kern/ipc_kobject.h	*/

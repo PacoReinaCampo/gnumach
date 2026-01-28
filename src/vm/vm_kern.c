@@ -92,6 +92,7 @@ projected_buffer_allocate(
 	vm_object_t object;
 	vm_map_entry_t u_entry, k_entry;
 	vm_offset_t addr;
+	phys_addr_t physical_addr;
 	vm_size_t r_size;
 	kern_return_t kr;
 
@@ -107,7 +108,8 @@ projected_buffer_allocate(
 
 	vm_map_lock(kernel_map);
 	kr = vm_map_find_entry(kernel_map, &addr, size, (vm_offset_t) 0,
-			       VM_OBJECT_NULL, &k_entry);
+			       VM_OBJECT_NULL, &k_entry,
+			       VM_PROT_DEFAULT, VM_PROT_ALL);
 	if (kr != KERN_SUCCESS) {
 	  vm_map_unlock(kernel_map);
 	  vm_object_deallocate(object);
@@ -124,7 +126,8 @@ projected_buffer_allocate(
 
 	vm_map_lock(map);
 	kr = vm_map_find_entry(map, &addr, size, (vm_offset_t) 0,
-			       VM_OBJECT_NULL, &u_entry);
+			       VM_OBJECT_NULL, &u_entry,
+			       protection, protection);
 	if (kr != KERN_SUCCESS) {
 	  vm_map_unlock(map);
 	  vm_map_lock(kernel_map);
@@ -140,8 +143,6 @@ projected_buffer_allocate(
              /*Creates coupling with kernel mapping of the buffer, and
                also guarantees that user cannot directly manipulate
                buffer VM entry*/
-	u_entry->protection = protection;
-	u_entry->max_protection = protection;
 	u_entry->inheritance = inheritance;
 	vm_map_unlock(map);
        	*user_p = addr;
@@ -159,8 +160,8 @@ projected_buffer_allocate(
 
 	pmap_pageable(map->pmap, *user_p, *user_p + size, FALSE);
 	for (r_size = 0; r_size < size; r_size += PAGE_SIZE) {
-	  addr = pmap_extract(kernel_pmap, *kernel_p + r_size);
-	  pmap_enter(map->pmap, *user_p + r_size, addr,
+	  physical_addr = pmap_extract(kernel_pmap, *kernel_p + r_size);
+	  pmap_enter(map->pmap, *user_p + r_size, physical_addr,
 		     protection, TRUE);
 	}
 
@@ -186,7 +187,8 @@ projected_buffer_map(
        vm_inherit_t 	inheritance)  /*Currently only VM_INHERIT_NONE supported*/
 {
 	vm_map_entry_t u_entry, k_entry;
-	vm_offset_t physical_addr, user_addr;
+	vm_offset_t user_addr;
+	phys_addr_t physical_addr;
 	vm_size_t r_size;
 	kern_return_t kr;
 
@@ -207,7 +209,8 @@ projected_buffer_map(
 
 	vm_map_lock(map);
 	kr = vm_map_find_entry(map, &user_addr, size, (vm_offset_t) 0,
-			       VM_OBJECT_NULL, &u_entry);
+			       VM_OBJECT_NULL, &u_entry,
+			       protection, protection);
 	if (kr != KERN_SUCCESS) {
 	  vm_map_unlock(map);
 	  return kr;
@@ -220,8 +223,6 @@ projected_buffer_map(
              /*Creates coupling with kernel mapping of the buffer, and
                also guarantees that user cannot directly manipulate
                buffer VM entry*/
-	u_entry->protection = protection;
-	u_entry->max_protection = protection;
 	u_entry->inheritance = inheritance;
 	u_entry->wired_count = k_entry->wired_count;
 	vm_map_unlock(map);
@@ -271,9 +272,9 @@ projected_buffer_deallocate(
 
 	/*Prepare for deallocation*/
 	if (entry->vme_start < start)
-	  _vm_map_clip_start(&map->hdr, entry, start);
+	  _vm_map_clip_start(&map->hdr, entry, start, 1);
 	if (entry->vme_end > end)
-	  _vm_map_clip_end(&map->hdr, entry, end);
+	  _vm_map_clip_end(&map->hdr, entry, end, 1);
       	if (map->first_free == entry)   /*Adjust first_free hint*/
 	  map->first_free = entry->vme_prev;
 	entry->projected_on = 0;        /*Needed to allow deletion*/
@@ -391,7 +392,8 @@ kmem_alloc(
 retry:
 	vm_map_lock(map);
 	kr = vm_map_find_entry(map, &addr, size, (vm_offset_t) 0,
-			       VM_OBJECT_NULL, &entry);
+			       VM_OBJECT_NULL, &entry,
+			       VM_PROT_DEFAULT, VM_PROT_ALL);
 	if (kr != KERN_SUCCESS) {
 		vm_map_unlock(map);
 
@@ -463,7 +465,8 @@ kmem_valloc(
 retry:
 	vm_map_lock(map);
 	kr = vm_map_find_entry(map, &addr, size, (vm_offset_t) 0,
-			       kernel_object, &entry);
+			       kernel_object, &entry,
+			       VM_PROT_DEFAULT, VM_PROT_ALL);
 	if (kr != KERN_SUCCESS) {
 		vm_map_unlock(map);
 
@@ -583,7 +586,8 @@ kmem_alloc_aligned(
 retry:
 	vm_map_lock(map);
 	kr = vm_map_find_entry(map, &addr, size, size - 1,
-			       kernel_object, &entry);
+			       kernel_object, &entry,
+			       VM_PROT_DEFAULT, VM_PROT_ALL);
 	if (kr != KERN_SUCCESS) {
 		vm_map_unlock(map);
 
@@ -1012,7 +1016,7 @@ kmem_io_map_copyout(
 			return(ret);
 		}
 		copy->cpy_cont = vm_map_copy_discard_cont;
-		copy->cpy_cont_args = (char *) new_copy;
+		copy->cpy_cont_args = (vm_map_copyin_args_t)new_copy;
 		copy = new_copy;
 		page_list = &copy->cpy_page_list[0];
 	}

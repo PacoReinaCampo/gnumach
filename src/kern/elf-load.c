@@ -31,11 +31,12 @@ int exec_load(exec_read_func_t *read, exec_read_exec_func_t *read_exec,
 		  void *handle, exec_info_t *out_info)
 {
 	vm_size_t actual;
-	Elf32_Ehdr x;
-	Elf32_Phdr *phdr, *ph;
+	Elf_Ehdr x;
+	Elf_Phdr *phdr, *ph;
 	vm_size_t phsize;
 	int i;
 	int result;
+	vm_offset_t loadbase = 0;
 
 	/* Read the ELF header.  */
 	if ((result = (*read)(handle, 0, &x, sizeof(x), &actual)) != 0)
@@ -50,16 +51,21 @@ int exec_load(exec_read_func_t *read, exec_read_exec_func_t *read_exec,
 		return EX_NOT_EXECUTABLE;
 
 	/* Make sure the file is of the right architecture.  */
-	if ((x.e_ident[EI_CLASS] != ELFCLASS32) ||
+	if ((x.e_ident[EI_CLASS] != MY_ELF_CLASS) ||
 	    (x.e_ident[EI_DATA] != MY_EI_DATA) ||
 	    (x.e_machine != MY_E_MACHINE))
 		return EX_WRONG_ARCH;
 
+	/* Leave room for mmaps etc. before PIE binaries.
+	 * Could add address randomization here.  */
+	if (x.e_type == ET_DYN || x.e_type == ET_REL)
+		loadbase = 128 << 20;
+
 	/* XXX others */
-	out_info->entry = (vm_offset_t) x.e_entry;
+	out_info->entry = (vm_offset_t) x.e_entry + loadbase;
 
 	phsize = x.e_phnum * x.e_phentsize;
-	phdr = (Elf32_Phdr *)alloca(phsize);
+	phdr = (Elf_Phdr *)alloca(phsize);
 
 	result = (*read)(handle, x.e_phoff, phdr, phsize, &actual);
 	if (result)
@@ -67,9 +73,11 @@ int exec_load(exec_read_func_t *read, exec_read_exec_func_t *read_exec,
 	if (actual < phsize)
 		return EX_CORRUPT;
 
+	out_info->stack_prot = VM_PROT_ALL;
+
 	for (i = 0; i < x.e_phnum; i++)
 	{
-		ph = (Elf32_Phdr *)((vm_offset_t)phdr + i * x.e_phentsize);
+		ph = (Elf_Phdr *)((vm_offset_t)phdr + i * x.e_phentsize);
 		if (ph->p_type == PT_LOAD)
 		{
 			exec_sectype_t type = EXEC_SECTYPE_ALLOC |
@@ -77,11 +85,17 @@ int exec_load(exec_read_func_t *read, exec_read_exec_func_t *read_exec,
 			if (ph->p_flags & PF_R) type |= EXEC_SECTYPE_READ;
 			if (ph->p_flags & PF_W) type |= EXEC_SECTYPE_WRITE;
 			if (ph->p_flags & PF_X) type |= EXEC_SECTYPE_EXECUTE;
+
 			result = (*read_exec)(handle,
 					      ph->p_offset, ph->p_filesz,
-					      ph->p_vaddr, ph->p_memsz, type);
+					      ph->p_vaddr + loadbase, ph->p_memsz, type);
 			if (result)
 				return result;
+		} else if (ph->p_type == PT_GNU_STACK) {
+			out_info->stack_prot = 0;
+			if (ph->p_flags & PF_R) out_info->stack_prot |= VM_PROT_READ;
+			if (ph->p_flags & PF_W) out_info->stack_prot |= VM_PROT_WRITE;
+			if (ph->p_flags & PF_X) out_info->stack_prot |= VM_PROT_EXECUTE;
 		}
 	}
 

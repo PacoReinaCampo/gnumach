@@ -58,8 +58,7 @@ int		db_macro_level = 0;
 db_expr_t	db_macro_args[DB_MACRO_LEVEL][DB_NARGS];
 
 static struct db_user_macro *
-db_lookup_macro(name)
-	const char *name;
+db_lookup_macro(const char *name)
 {
 	struct db_user_macro *mp;
 
@@ -73,7 +72,11 @@ db_lookup_macro(name)
 }
 
 void
-db_def_macro_cmd(void)
+db_def_macro_cmd(
+	db_expr_t	addr,
+	int		have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	char *p;
 	int c;
@@ -104,7 +107,11 @@ db_def_macro_cmd(void)
 }
 
 void
-db_del_macro_cmd(void)
+db_del_macro_cmd(
+	db_expr_t	addr,
+	int		have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	struct db_user_macro *mp;
 
@@ -120,7 +127,11 @@ db_del_macro_cmd(void)
 }
 
 void
-db_show_macro(void)
+db_show_macro(
+	db_expr_t	addr,
+	int		have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	struct db_user_macro *mp;
 	int  t;
@@ -140,8 +151,7 @@ db_show_macro(void)
 }
 
 int
-db_exec_macro(name)
-	const char *name;
+db_exec_macro(const char *name)
 {
 	struct db_user_macro *mp;
 	int n;

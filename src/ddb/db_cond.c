@@ -102,8 +102,7 @@ db_cond_check(db_thread_breakpoint_t bkpt)
 }
 
 void
-db_cond_print(bkpt)
-	const db_thread_breakpoint_t bkpt;
+db_cond_print(const db_thread_breakpoint_t bkpt)
 {
 	char *p, *ep;
 	struct db_cond *cp;
@@ -121,7 +120,11 @@ db_cond_print(bkpt)
 }
 
 void
-db_cond_cmd(void)
+db_cond_cmd(
+	db_expr_t	addr,
+	int		have_addr,
+	db_expr_t	count,
+	const char *	modif)
 {
 	int c;
 	struct db_cond *cp;

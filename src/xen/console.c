@@ -21,7 +21,7 @@
 #include <device/tty.h>
 #include <device/cons.h>
 #include <machine/pmap.h>
-#include <machine/machspl.h>
+#include <machine/spl.h>
 #include <xen/public/io/console.h>
 #include "console.h"
 #include "ring.h"
@@ -29,27 +29,21 @@
 
 /* Hypervisor part */
 
-decl_simple_lock_data(static, outlock);
-decl_simple_lock_data(static, inlock);
+def_simple_lock_irq_data(static, outlock);
+def_simple_lock_irq_data(static, inlock);
 static struct xencons_interface *console;
 static int kd_pollc;
 int kb_mode;	/* XXX: actually don't care.  */
 
-#undef hyp_console_write
-void hyp_console_write(const char *str, int len)
-{
-	hyp_console_io (CONSOLEIO_write, len, kvtolin(str));
-}
-
-int hypputc(int c)
+static int hypputc(int c)
 {
 	if (!console) {
 		char d = c;
 		hyp_console_io(CONSOLEIO_write, 1, kvtolin(&d));
 	} else {
-		spl_t spl = splhigh();
+		spl_t spl;
 		static int complain;
-		simple_lock(&outlock);
+		spl = simple_lock_irq(&outlock);
 		while (hyp_ring_smash(console->out, console->out_prod, console->out_cons)) {
 			if (!complain) {
 				complain = 1;
@@ -62,8 +56,7 @@ int hypputc(int c)
 		wmb();
 		console->out_prod++;
 		hyp_event_channel_send(boot_info.console_evtchn);
-		simple_unlock(&outlock);
-		splx(spl);
+		simple_unlock_irq(spl, &outlock);
 	}
 	return 0;
 }
@@ -111,7 +104,7 @@ static void hypcnintr(int unit, spl_t spl, void *ret_addr, void *regs) {
 	struct tty *tp = &hypcn_tty;
 	if (kd_pollc)
 		return;
-	simple_lock(&inlock);
+	simple_lock_nocheck(&inlock.slock);
 	while (console->in_prod != console->in_cons) {
 		int c = hyp_ring_cell(console->in, console->in_cons);
 		mb();
@@ -127,7 +120,7 @@ static void hypcnintr(int unit, spl_t spl, void *ret_addr, void *regs) {
 			(*linesw[tp->t_line].l_rint)(c, tp);
 	}
 	hyp_event_channel_send(boot_info.console_evtchn);
-	simple_unlock(&inlock);
+	simple_unlock_nocheck(&inlock.slock);
 }
 
 int hypcnread(dev_t dev, io_req_t ior)
@@ -142,7 +135,7 @@ int hypcnwrite(dev_t dev, io_req_t ior)
 	return char_write(&hypcn_tty, ior);
 }
 
-void hypcnstart(struct tty *tp)
+static void hypcnstart(struct tty *tp)
 {
 	spl_t	o_pri;
 	int ch;
@@ -166,7 +159,7 @@ void hypcnstart(struct tty *tp)
 	}
 }
 
-void hypcnstop()
+static void hypcnstop(struct tty *t, int n)
 {
 }
 
@@ -190,32 +183,29 @@ int hypcnopen(dev_t dev, int flag, io_req_t ior)
 	struct tty 	*tp = &hypcn_tty;
 	spl_t	o_pri;
 
-	o_pri = spltty();
-	simple_lock(&tp->t_lock);
+	o_pri = simple_lock_irq(&tp->t_lock);
 	if (!(tp->t_state & (TS_ISOPEN|TS_WOPEN))) {
 		/* XXX ttychars allocates memory */
-		simple_unlock(&tp->t_lock);
+		simple_unlock_nocheck(&tp->t_lock.slock);
 		ttychars(tp);
-		simple_lock(&tp->t_lock);
+		simple_lock_nocheck(&tp->t_lock.slock);
 		tp->t_oproc = hypcnstart;
 		tp->t_stop = hypcnstop;
-		tp->t_ospeed = tp->t_ispeed = B9600;
-		tp->t_flags = ODDP|EVENP|ECHO|CRMOD|XTABS;
+		tp->t_ospeed = tp->t_ispeed = B115200;
+		tp->t_flags = ODDP|EVENP|ECHO|CRMOD|XTABS|LITOUT;
 	}
 	tp->t_state |= TS_CARR_ON;
-	simple_unlock(&tp->t_lock);
-	splx(o_pri);
+	simple_unlock_irq(o_pri, &tp->t_lock);
 	return (char_open(dev, tp, flag, ior));
 }
 
 void hypcnclose(dev_t dev, int flag)
 {
 	struct tty	*tp = &hypcn_tty;
-	spl_t s = spltty();
-	simple_lock(&tp->t_lock);
+	spl_t s;
+	s = simple_lock_irq(&tp->t_lock);
 	ttyclose(tp);
-	simple_unlock(&tp->t_lock);
-	splx(s);
+	simple_unlock_irq(s, &tp->t_lock);
 }
 
 int hypcnprobe(struct consdev *cp)
@@ -229,12 +219,12 @@ int hypcninit(struct consdev *cp)
 {
 	if (console)
 		return 0;
-	simple_lock_init(&outlock);
-	simple_lock_init(&inlock);
+	simple_lock_init_irq(&outlock);
+	simple_lock_init_irq(&inlock);
 	console = (void*) mfn_to_kv(boot_info.console_mfn);
 #ifdef	MACH_PV_PAGETABLES
 	pmap_set_page_readwrite(console);
 #endif	/* MACH_PV_PAGETABLES */
-	hyp_evt_handler(boot_info.console_evtchn, hypcnintr, 0, SPL6);
+	hyp_evt_handler(boot_info.console_evtchn, (interrupt_handler_fn)hypcnintr, 0, SPL6);
 	return 0;
 }

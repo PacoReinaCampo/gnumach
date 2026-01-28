@@ -34,6 +34,7 @@
 #define	_DEVICE_TTY_H_
 
 #include <kern/lock.h>
+#include <kern/mach_clock.h>
 #include <kern/queue.h>
 #include <mach/port.h>
 
@@ -43,7 +44,7 @@
 #include <device/io_req.h>
 
 struct tty {
-	decl_simple_lock_data(,t_lock)
+	decl_simple_lock_irq_data(,t_lock)	/* Shall be taken at spltty only */
 	struct cirbuf	t_inq;		/* input buffer */
 	struct cirbuf	t_outq;		/* output buffer */
 	char *		t_addr;		/* device pointer */
@@ -68,6 +69,7 @@ struct tty {
 	queue_head_t	t_delayed_write;/* pending write requests */
 	queue_head_t	t_delayed_open;	/* pending open requests */
 
+	timeout_t	t_timeout;	/* timeout pointer */
 /*
  * Items beyond this point should be removed to device-specific
  * extension structures.

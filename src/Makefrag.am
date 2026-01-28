@@ -23,8 +23,6 @@ if enable_kdb
 libkernel_a_SOURCES += \
 	ddb/db_access.c \
 	ddb/db_access.h \
-	ddb/db_aout.c \
-	ddb/db_aout.h \
 	ddb/db_elf.c \
 	ddb/db_elf.h \
 	ddb/db_break.c \
@@ -78,6 +76,8 @@ endif
 #
 
 libkernel_a_SOURCES += \
+	ipc/copy_user.c \
+	ipc/copy_user.h \
 	ipc/ipc_entry.c \
 	ipc/ipc_entry.h \
 	ipc/ipc_init.c \
@@ -114,7 +114,6 @@ libkernel_a_SOURCES += \
 	ipc/mach_msg.h \
 	ipc/mach_port.c \
 	ipc/mach_port.h \
-	ipc/mach_rpc.c \
 	ipc/mach_debug.c \
 	ipc/port.h
 EXTRA_DIST += \
@@ -216,8 +215,6 @@ libkernel_a_SOURCES += \
 	kern/thread.h \
 	kern/thread_swap.c \
 	kern/thread_swap.h \
-	kern/time_stamp.c \
-	kern/time_stamp.h \
 	kern/timer.c \
 	kern/timer.h \
 	kern/xpr.c \
@@ -240,11 +237,10 @@ EXTRA_DIST += \
 #
 
 libkernel_a_SOURCES += \
-	util/putchar.c \
-	util/putchar.h \
-	util/puts.c \
 	util/atoi.c \
-	util/atoi.h
+	util/atoi.h \
+	util/byteorder.h \
+	util/byteorder.c
 
 #
 # Virtual memory implementation.
@@ -316,6 +312,7 @@ libkernel_a_SOURCES += \
 	device/ds_routines.h \
 	device/if_ether.h \
 	device/if_hdr.h \
+	device/input.h \
 	device/intr.c \
 	device/intr.h \
 	device/io_req.h \
@@ -364,6 +361,7 @@ include_device_HEADERS = \
 	include/device/device_types.defs \
 	include/device/device_types.h \
 	include/device/disk_status.h \
+	include/device/irq_status.h \
 	include/device/net_status.h \
 	include/device/notify.defs \
 	include/device/notify.h \
@@ -372,9 +370,7 @@ include_device_HEADERS = \
 
 include_machdir = $(includedir)/mach
 include_mach_HEADERS = \
-	include/mach/bootstrap.defs \
 	include/mach/default_pager.defs \
-	include/mach/default_pager_helper.defs \
 	include/mach/default_pager_types.defs \
 	include/mach/exc.defs \
 	include/mach/mach.defs \
@@ -403,8 +399,6 @@ include_mach_HEADERS = \
 	include/mach/memory_object.h \
 	include/mach/message.h \
 	include/mach/mig_errors.h \
-	include/mach/msg_type.h \
-	include/mach/multiboot.h \
 	include/mach/notify.h \
 	include/mach/pc_sample.h \
 	include/mach/policy.h \
@@ -412,7 +406,6 @@ include_mach_HEADERS = \
 	include/mach/processor_info.h \
 	include/mach/profil.h \
 	include/mach/profilparam.h \
-	include/mach/rpc.h \
 	include/mach/std_types.h \
 	include/mach/syscall_sw.h \
 	include/mach/task_info.h \
@@ -445,18 +438,16 @@ include_mach_debugdir = $(includedir)/mach_debug
 include_mach_debug_HEADERS = \
 	$(addprefix include/mach_debug/, \
 		hash_info.h \
-		ipc_info.h \
 		mach_debug.defs	\
 		mach_debug_types.defs \
 		mach_debug_types.h \
-		pc_info.h \
 		vm_info.h \
 		slab_info.h \
 	)
 
 # Other headers for the distribution.  We don't install these, because the
 # GNU C library has correct versions for users to use.
-# other-sys-headers := types.h time.h reboot.h ioctl.h
+# other-sys-headers := types.h reboot.h ioctl.h
 # other-mach-headers := mig_support.h mach_traps.h error.h
 # other-headers := alloca.h
 
@@ -609,12 +600,18 @@ endif
 # Architecture specific parts.
 #
 
-# ix86.
 if HOST_ix86
-include i386/Makefrag.am
+include i386/Makefrag_x86.am
+endif
+if HOST_x86_64
+include i386/Makefrag_x86.am
 endif
 
+# ix86.
+include i386/Makefrag.am
+
 # x86_64.
-if HOST_x86_64
 include x86_64/Makefrag.am
-endif
+
+# aarch64.
+include aarch64/Makefrag.am

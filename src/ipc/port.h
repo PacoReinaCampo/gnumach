@@ -39,13 +39,14 @@
 #ifndef	_IPC_PORT_H_
 #define _IPC_PORT_H_
 
+#include <kern/debug.h>
 #include <mach/port.h>
 
 /*
- *	mach_port_t must be an unsigned type.  Port values
+ *	mach_port_name_t must be an unsigned type.  Port values
  *	have two parts, a generation number and an index.
  *	These macros encapsulate all knowledge of how
- *	a mach_port_t is laid out.
+ *	a mach_port_name_t is laid out.
  *
  *	If the size of generation numbers changes,
  *	be sure to update IE_BITS_GEN_MASK and friends
@@ -67,11 +68,10 @@
 
 /*
  *	Typedefs for code cleanliness.  These must all have
- *	the same (unsigned) type as mach_port_t.
+ *	the same (unsigned) type as mach_port_name_t.
  */
 
-typedef mach_port_t mach_port_index_t;		/* index values */
-typedef mach_port_t mach_port_gen_t;		/* generation numbers */
+typedef mach_port_name_t mach_port_gen_t;	/* generation numbers */
 
 
 #define	MACH_PORT_UREFS_MAX	((mach_port_urefs_t) ((1 << 16) - 1))
@@ -83,5 +83,24 @@ typedef mach_port_t mach_port_gen_t;		/* generation numbers */
 
 #define	MACH_PORT_UREFS_UNDERFLOW(urefs, delta)				\
 		(((delta) < 0) && (-(delta) > (urefs)))
+
+
+static inline mach_port_t invalid_name_to_port(mach_port_name_t name)
+{
+  if (name == MACH_PORT_NAME_NULL)
+    return MACH_PORT_NULL;
+  if (name == MACH_PORT_NAME_DEAD)
+    return MACH_PORT_DEAD;
+  panic("invalid_name_to_port() called with a valid port");
+}
+
+static inline mach_port_name_t invalid_port_to_name(mach_port_t port)
+{
+  if (port == MACH_PORT_NULL)
+    return MACH_PORT_NAME_NULL;
+  if (port == MACH_PORT_DEAD)
+    return MACH_PORT_NAME_DEAD;
+  panic("invalid_port_to_name() called with a valid name");
+}
 
 #endif	/* _IPC_PORT_H_ */

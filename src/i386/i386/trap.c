@@ -36,7 +36,7 @@
 #include <i386/locore.h>
 #include <i386/model_dep.h>
 #include <intel/read_fault.h>
-#include <machine/machspl.h>	/* for spl_t */
+#include <machine/spl.h>	/* for spl_t */
 #include <machine/db_interface.h>
 
 #include <mach/exception.h>
@@ -58,11 +58,15 @@
 #include <kern/exception.h>
 
 #if MACH_KDB
+#include <ddb/db_break.h>
 #include <ddb/db_run.h>
 #include <ddb/db_watch.h>
 #endif
 
 #include "debug.h"
+
+/* Called from assembly (locore.S) */
+void handle_double_fault(struct i386_saved_state *regs);
 
 #if	MACH_KDB
 boolean_t	debug_all_traps_with_kdb = FALSE;
@@ -87,7 +91,7 @@ extern boolean_t kttd_enabled;
 boolean_t debug_all_traps_with_kttd = TRUE;
 #endif	/* MACH_TTD */
 
-void
+static void
 user_page_fault_continue(kern_return_t kr)
 {
 	thread_t thread = current_thread();
@@ -153,9 +157,9 @@ char *trap_name(unsigned int trapnum)
  */
 void kernel_trap(struct i386_saved_state *regs)
 {
-	int		code;
-	int		subcode;
-	int		type;
+	unsigned long	code;
+	unsigned long	subcode;
+	unsigned long	type;
 	vm_map_t	map;
 	kern_return_t	result;
 	thread_t	thread;
@@ -171,7 +175,7 @@ void kernel_trap(struct i386_saved_state *regs)
 ((short*)0xb8700)[2] = 0x0f30+(type % 10);
 #endif
 #if 0
-printf("kernel trap %d error %d\n", type, code);
+printf("kernel trap %d error %d\n", (int) type, (int) code);
 dump_ss(regs);
 #endif
 
@@ -199,7 +203,8 @@ dump_ss(regs);
 		/* If it's in the kernel linear address region,
 		   convert it to a kernel virtual address
 		   and use the kernel map to process the fault.  */
-		if (subcode >= LINEAR_MIN_KERNEL_ADDRESS) {
+		if (lintokv(subcode) == 0 ||
+			subcode >= LINEAR_MIN_KERNEL_ADDRESS) {
 #if 0
 		printf("%08x in kernel linear address range\n", subcode);
 #endif
@@ -211,7 +216,7 @@ dump_ss(regs);
 			if (trunc_page(subcode) == 0
 			    || (subcode >= (long)_start
 				&& subcode < (long)etext)) {
-				printf("Kernel page fault at address 0x%x, "
+				printf("Kernel page fault at address 0x%lx, "
 				       "eip = 0x%lx\n",
 				       subcode, regs->eip);
 				goto badtrap;
@@ -220,7 +225,7 @@ dump_ss(regs);
 			if (thread)
 				map = thread->task->map;
 			if (!thread || map == kernel_map) {
-				printf("kernel page fault at %08x:\n", subcode);
+				printf("kernel page fault at %08lx:\n", subcode);
 				dump_ss(regs);
 				panic("kernel thread accessed user space!\n");
 			}
@@ -234,10 +239,16 @@ dump_ss(regs);
 		 */
 		result = vm_fault(map,
 				  trunc_page((vm_offset_t)subcode),
+#if (__i386__ && !(__i486__ || __i586__ || __i686__))
 				  VM_PROT_READ|VM_PROT_WRITE,
+#else
+				  (code & T_PF_WRITE)
+				    ? VM_PROT_READ|VM_PROT_WRITE
+				    : VM_PROT_READ,
+#endif
 				  FALSE,
 				  FALSE,
-				  (void (*)()) 0);
+				  vm_fault_no_continuation);
 #if	MACH_KDB
 		if (result == KERN_SUCCESS) {
 		    /* Look for watchpoints */
@@ -250,6 +261,7 @@ dump_ss(regs);
 		}
 		else
 #endif	/* MACH_KDB */
+#if (__i386__ && !(__i486__ || __i586__ || __i686__))
 		if ((code & T_PF_WRITE) == 0 &&
 		    result == KERN_PROTECTION_FAILURE)
 		{
@@ -261,6 +273,9 @@ dump_ss(regs);
 		    result = intel_read_fault(map,
 					  trunc_page((vm_offset_t)subcode));
 		}
+#else
+		;
+#endif
 
 		if (result == KERN_SUCCESS) {
 		    /*
@@ -278,6 +293,9 @@ dump_ss(regs);
 		    }
 		    return;
 		}
+
+		/* Fall-through */
+	    case T_GENERAL_PROTECTION:
 
 		/*
 		 * If there is a failure recovery address
@@ -319,8 +337,8 @@ dump_ss(regs);
 		if (type < TRAP_TYPES)
 			printf("%s trap", trap_type[type]);
 		else
-			printf("trap %d", type);
-		printf(", eip 0x%lx\n", regs->eip);
+			printf("trap %ld", type);
+		printf(", eip 0x%lx, code %lx, cr2 %lx\n", regs->eip, code, regs->cr2);
 #if	MACH_TTD
 		if (kttd_enabled && kttd_trap(type, code, regs))
 			return;
@@ -330,7 +348,7 @@ dump_ss(regs);
 		    return;
 #endif	/* MACH_KDB */
 		splhigh();
-		printf("kernel trap, type %d, code = %x\n",
+		printf("kernel trap, type %ld, code = %lx\n",
 			type, code);
 		dump_ss(regs);
 		panic("trap");
@@ -346,10 +364,14 @@ dump_ss(regs);
 int user_trap(struct i386_saved_state *regs)
 {
 	int	exc = 0;	/* Suppress gcc warning */
-	int	code;
-	int	subcode;
-	int	type;
+	unsigned long	code;
+	unsigned long	subcode;
+	unsigned long	type;
 	thread_t thread = current_thread();
+
+#ifdef __x86_64__
+	assert(regs == &thread->pcb->iss);
+#endif
 
 	type = regs->trapno;
 	code = 0;
@@ -361,7 +383,7 @@ int user_trap(struct i386_saved_state *regs)
 	((short*)0xb8700)[5] = 0x0f30+(type % 10);
 #endif
 #if 0
-	printf("user trap %d error %d\n", type, code);
+	printf("user trap %ld error %ld\n", type, code);
 	dump_ss(regs);
 #endif
 
@@ -402,8 +424,6 @@ int user_trap(struct i386_saved_state *regs)
 #endif	/* MACH_TTD */
 #if	MACH_KDB
 	    {
-		boolean_t db_find_breakpoint_here();
-
 		if (db_find_breakpoint_here(
 			(current_thread())? current_thread()->task: TASK_NULL,
 			regs->eip - 1)) {
@@ -479,6 +499,7 @@ int user_trap(struct i386_saved_state *regs)
 			opcode = inst_fetch(regs->eip, regs->cs);
 			for (i = 0; i < 4; i++)
 				addr[i] = inst_fetch(regs->eip+i+1, regs->cs);
+			(void) addr;
 			for (i = 0; i < 2; i++)
 				seg[i] = inst_fetch(regs->eip+i+5, regs->cs);
 			if (opcode == 0x9a && seg[0] == 0x7 && seg[1] == 0) {
@@ -542,7 +563,7 @@ int user_trap(struct i386_saved_state *regs)
 		    return 0;
 #endif	/* MACH_KDB */
 		splhigh();
-		printf("user trap, type %d, code = %lx\n",
+		printf("user trap, type %ld, code = %lx\n",
 		       type, regs->err);
 		dump_ss(regs);
 		panic("trap");
@@ -550,11 +571,12 @@ int user_trap(struct i386_saved_state *regs)
 	}
 
 #if	MACH_TTD
-	if (debug_all_traps_with_kttd && kttd_trap(type, regs->err, regs))
+	if ((debug_all_traps_with_kttd || thread->task->essential) &&
+	    kttd_trap(type, regs->err, regs))
 		return 0;
 #endif	/* MACH_TTD */
 #if	MACH_KDB
-	if (debug_all_traps_with_kdb &&
+	if ((debug_all_traps_with_kdb || thread->task->essential) &&
 	    kdb_trap(type, regs->err, regs))
 		return 0;
 #endif	/* MACH_KDB */
@@ -613,7 +635,7 @@ void
 i386_exception(
 	int	exc,
 	int	code,
-	int	subcode)
+	long	subcode)
 {
 	spl_t	s;
 
@@ -633,8 +655,7 @@ i386_exception(
  * return saved state for interrupted user thread
  */
 unsigned
-interrupted_pc(t)
-	const thread_t t;
+interrupted_pc(const thread_t t)
 {
 	struct i386_saved_state *iss;
 
@@ -652,3 +673,9 @@ db_debug_all_traps (boolean_t enable)
 }
 
 #endif	/* MACH_KDB */
+
+void handle_double_fault(struct i386_saved_state *regs)
+{
+  dump_ss(regs);
+  panic("DOUBLE FAULT! This is critical\n");
+}

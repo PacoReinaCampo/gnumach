@@ -35,7 +35,7 @@
 #include <kern/printf.h>
 #include <mach/machine.h>
 #include <machine/locore.h>
-#include <machine/machspl.h>	/* For def'n of splsched() */
+#include <machine/spl.h>	/* For def'n of splsched() */
 #include <machine/model_dep.h>
 #include <kern/ast.h>
 #include <kern/counters.h>
@@ -49,6 +49,7 @@
 #include <kern/queue.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
+#include <kern/smp.h>
 #include <kern/syscall_subr.h>
 #include <kern/thread.h>
 #include <kern/thread_swap.h>
@@ -66,7 +67,7 @@ unsigned	sched_tick;
 
 thread_t	sched_thread_id;
 
-timer_elt_data_t recompute_priorities_timer;
+timeout_data_t	recompute_priorities_timer;
 
 /*
  *	State machine
@@ -127,14 +128,32 @@ timer_elt_data_t recompute_priorities_timer;
 
 #define NUMQUEUES	1031
 
+/* Shall be taken at splsched only */
+decl_simple_lock_data(static,	wait_lock[NUMQUEUES])	 /* Lock for... */
 queue_head_t		wait_queue[NUMQUEUES];
-decl_simple_lock_data(,	wait_lock[NUMQUEUES])
+
+#ifdef MACH_LDEBUG
+#define waitq_lock(wl)		\
+MACRO_BEGIN \
+	assert_splsched(); \
+	simple_lock_nocheck(wl); \
+MACRO_END
+#define waitq_unlock(wl)	\
+MACRO_BEGIN \
+	assert_splsched(); \
+	simple_unlock_nocheck(wl); \
+MACRO_END
+#else
+#define waitq_lock(wl)		simple_lock_nocheck(wl)
+#define waitq_unlock(wl)	simple_unlock_nocheck(wl)
+#endif
+
 
 /* NOTE: we want a small positive integer out of this */
 #define wait_hash(event) \
 	((((long)(event) < 0) ? ~(long)(event) : (long)(event)) % NUMQUEUES)
 
-void wait_queue_init(void)
+static void wait_queue_init(void)
 {
 	int i;
 
@@ -162,11 +181,11 @@ void sched_init(void)
  *	Thread timeout routine, called when timer expires.
  *	Called at splsoftclock.
  */
-void thread_timeout(
+static void thread_timeout(
 	void *_thread)
 {
 	thread_t thread = _thread;
-	assert(thread->timer.set == TELT_UNSET);
+	assert(!(thread->timer.set & TIMEOUT_PENDING));
 
 	clear_wait(thread, THREAD_TIMED_OUT, FALSE);
 }
@@ -232,7 +251,7 @@ void assert_wait(
 		index = wait_hash(event);
 		q = &wait_queue[index];
 		lock = &wait_lock[index];
-		simple_lock(lock);
+		waitq_lock(lock);
 		thread_lock(thread);
 		enqueue_tail(q, &(thread->links));
 		thread->wait_event = event;
@@ -241,7 +260,7 @@ void assert_wait(
 		else
 			thread->state |= TH_WAIT | TH_UNINT;
 		thread_unlock(thread);
-		simple_unlock(lock);
+		waitq_unlock(lock);
 	}
 	else {
 		thread_lock(thread);
@@ -294,7 +313,7 @@ void clear_wait(
 		index = wait_hash(event);
 		q = &wait_queue[index];
 		lock = &wait_lock[index];
-		simple_lock(lock);
+		waitq_lock(lock);
 		/*
 		 *	If the thread is still waiting on that event,
 		 *	then remove it from the list.  If it is waiting
@@ -307,7 +326,7 @@ void clear_wait(
 			thread->wait_event = 0;
 			event = 0;		/* cause to run below */
 		}
-		simple_unlock(lock);
+		waitq_unlock(lock);
 	}
 	if (event == 0) {
 		int	state = thread->state;
@@ -386,7 +405,7 @@ boolean_t thread_wakeup_prim(
 	q = &wait_queue[index];
 	s = splsched();
 	lock = &wait_lock[index];
-	simple_lock(lock);
+	waitq_lock(lock);
 	thread = (thread_t) queue_first(q);
 	while (!queue_end(q, (queue_entry_t)thread)) {
 		next_th = (thread_t) queue_next((queue_t) thread);
@@ -435,7 +454,7 @@ boolean_t thread_wakeup_prim(
 		}
 		thread = next_th;
 	}
-	simple_unlock(lock);
+	waitq_unlock(lock);
 	splx(s);
 	return (woke);
 }
@@ -490,7 +509,7 @@ void thread_bind(
  *	Assumes splsched.
  */
 
-thread_t thread_select(
+static thread_t thread_select(
 	processor_t myprocessor)
 {
 	thread_t thread;
@@ -789,7 +808,7 @@ boolean_t thread_invoke(
 	/*
 	 *	switch_context is machine-dependent.  It does the
 	 *	machine-dependent components of a context-switch, like
-	 *	changing address spaces.  It updates active_threads.
+	 *	changing address spaces.  It updates active_thread.
 	 *	It returns only if a continuation is not supplied.
 	 */
 	counter(c_thread_invoke_csw++);
@@ -1173,7 +1192,7 @@ void update_priority(
 		whichq = NRQS - 1;					\
 	    }								\
 									\
-	    simple_lock(&(rq)->lock);	/* lock the run queue */	\
+	    runq_lock(rq);	/* lock the run queue */	\
 	    checkrq((rq), "thread_setrun: before adding thread");	\
 	    enqueue_tail(&(rq)->runq[whichq], &((th)->links));		\
 									\
@@ -1184,7 +1203,7 @@ void update_priority(
 	    (th)->runq = (rq);						\
 	    thread_check((th), (rq));					\
 	    checkrq((rq), "thread_setrun: after adding thread");	\
-	    simple_unlock(&(rq)->lock);					\
+	    runq_unlock(rq);						\
 	MACRO_END
 #else	/* DEBUG */
 #define run_queue_enqueue(rq, th)					\
@@ -1197,7 +1216,7 @@ void update_priority(
 		whichq = NRQS - 1;					\
 	    }								\
 									\
-	    simple_lock(&(rq)->lock);	/* lock the run queue */	\
+	    runq_lock(rq);	/* lock the run queue */	\
 	    enqueue_tail(&(rq)->runq[whichq], &((th)->links));		\
 									\
 	    if (whichq < (rq)->low || (rq)->count == 0) 		\
@@ -1205,7 +1224,7 @@ void update_priority(
 									\
 	    (rq)->count++;						\
 	    (th)->runq = (rq);						\
-	    simple_unlock(&(rq)->lock);					\
+	    runq_unlock(rq);						\
 	MACRO_END
 #endif	/* DEBUG */
 /*
@@ -1251,8 +1270,8 @@ void thread_setrun(
 	     */
 	    processor = th->last_processor;
 	    if (processor->state == PROCESSOR_IDLE) {
-		    simple_lock(&processor->lock);
-		    simple_lock(&pset->idle_lock);
+		    processor_lock(processor);
+		    pset_idle_lock();
 		    if ((processor->state == PROCESSOR_IDLE)
 #if	MACH_HOST
 			&& (processor->processor_set == pset)
@@ -1263,17 +1282,19 @@ void thread_setrun(
 			    pset->idle_count--;
 			    processor->next_thread = th;
 			    processor->state = PROCESSOR_DISPATCHING;
-			    simple_unlock(&pset->idle_lock);
-			    simple_unlock(&processor->lock);
+			    pset_idle_unlock();
+			    processor_unlock(processor);
+			    if (processor != current_processor())
+				cause_ast_check(processor);
 		            return;
 		    }
-		    simple_unlock(&pset->idle_lock);
-		    simple_unlock(&processor->lock);
+		    pset_idle_unlock();
+		    processor_unlock(processor);
 	    }
 #endif	/* HW_FOOTPRINT */
 
 	    if (pset->idle_count > 0) {
-		simple_lock(&pset->idle_lock);
+		pset_idle_lock();
 		if (pset->idle_count > 0) {
 		    processor = (processor_t) queue_first(&pset->idle_queue);
 		    queue_remove(&(pset->idle_queue), processor, processor_t,
@@ -1281,10 +1302,12 @@ void thread_setrun(
 		    pset->idle_count--;
 		    processor->next_thread = th;
 		    processor->state = PROCESSOR_DISPATCHING;
-		    simple_unlock(&pset->idle_lock);
+		    pset_idle_unlock();
+		    if (processor != current_processor())
+			cause_ast_check(processor);
 		    return;
 		}
-		simple_unlock(&pset->idle_lock);
+		pset_idle_unlock();
 	    }
 	    rq = &(pset->runq);
 	    run_queue_enqueue(rq,th);
@@ -1309,21 +1332,23 @@ void thread_setrun(
 	     *  processor here because it may not be the current one.
 	     */
 	    if (processor->state == PROCESSOR_IDLE) {
-		simple_lock(&processor->lock);
+		processor_lock(processor);
 		pset = processor->processor_set;
-		simple_lock(&pset->idle_lock);
+		pset_idle_lock();
 		if (processor->state == PROCESSOR_IDLE) {
 		    queue_remove(&pset->idle_queue, processor,
 			processor_t, processor_queue);
 		    pset->idle_count--;
 		    processor->next_thread = th;
 		    processor->state = PROCESSOR_DISPATCHING;
-		    simple_unlock(&pset->idle_lock);
-		    simple_unlock(&processor->lock);
+		    pset_idle_unlock();
+		    processor_unlock(processor);
+		    if (processor != current_processor())
+			cause_ast_check(processor);
 		    return;
 		}
-		simple_unlock(&pset->idle_lock);
-		simple_unlock(&processor->lock);
+		pset_idle_unlock();
+		processor_unlock(processor);
 	    }
 	    rq = &(processor->runq);
 	    run_queue_enqueue(rq,th);
@@ -1421,7 +1446,7 @@ struct run_queue *rem_runq(
 	 *	the thread is on a runq, but could leave.
 	 */
 	if (rq != RUN_QUEUE_NULL) {
-		simple_lock(&rq->lock);
+		runq_lock(rq);
 #if	DEBUG
 		checkrq(rq, "rem_runq: at entry");
 #endif	/* DEBUG */
@@ -1440,7 +1465,7 @@ struct run_queue *rem_runq(
 			checkrq(rq, "rem_runq: after removing thread");
 #endif	/* DEBUG */
 			th->runq = RUN_QUEUE_NULL;
-			simple_unlock(&rq->lock);
+			runq_unlock(rq);
 		}
 		else {
 			/*
@@ -1449,7 +1474,7 @@ struct run_queue *rem_runq(
 			 *	can't move again because this routine's
 			 *	caller locked the thread.
 			 */
-			simple_unlock(&rq->lock);
+			runq_unlock(rq);
 			rq = RUN_QUEUE_NULL;
 		}
 	}
@@ -1570,7 +1595,7 @@ thread_t choose_pset_thread(
 	 *	was running.  If it was in an assignment or shutdown,
 	 *	leave it alone.  Return its idle thread.
 	 */
-	simple_lock(&pset->idle_lock);
+	pset_idle_lock();
 	if (myprocessor->state == PROCESSOR_RUNNING) {
 	    myprocessor->state = PROCESSOR_IDLE;
 	    /*
@@ -1588,7 +1613,7 @@ thread_t choose_pset_thread(
 
 	    pset->idle_count++;
 	}
-	simple_unlock(&pset->idle_lock);
+	pset_idle_unlock();
 
 	return myprocessor->idle_thread;
 }
@@ -1604,7 +1629,7 @@ int	no_dispatch_count = 0;
  *	to execute.
  */
 
-void __attribute__((noreturn)) idle_thread_continue(void)
+static void __attribute__((noreturn)) idle_thread_continue(void)
 {
 	processor_t myprocessor;
 	volatile thread_t *threadp;
@@ -1713,12 +1738,12 @@ retry:
 			processor_set_t pset;
 
 			pset = myprocessor->processor_set;
-			simple_lock(&pset->idle_lock);
+			pset_idle_lock();
 			if (myprocessor->state != PROCESSOR_IDLE) {
 				/*
 				 *	Something happened, try again.
 				 */
-				simple_unlock(&pset->idle_lock);
+				pset_idle_unlock();
 				goto retry;
 			}
 			/*
@@ -1730,7 +1755,7 @@ retry:
 			queue_remove(&pset->idle_queue, myprocessor,
 				processor_t, processor_queue);
 			myprocessor->state = PROCESSOR_RUNNING;
-			simple_unlock(&pset->idle_lock);
+			pset_idle_unlock();
 			counter(c_idle_thread_block++);
 			thread_block(idle_thread_continue);
 		}
@@ -1743,7 +1768,9 @@ retry:
 			 */
 			if ((new_thread = (thread_t)*threadp)!= THREAD_NULL) {
 				*threadp = (volatile thread_t) THREAD_NULL;
+				thread_lock(new_thread);
 				thread_setrun(new_thread, FALSE);
+				thread_unlock(new_thread);
 			}
 
 			counter(c_idle_thread_block++);
@@ -1795,7 +1822,7 @@ void idle_thread(void)
  *	we don't want to do at interrupt level.  This allows us to
  *	avoid blocking.
  */
-void sched_thread_continue(void)
+static void sched_thread_continue(void)
 {
     while (TRUE) {
 	(void) compute_mach_factor();
@@ -1860,7 +1887,7 @@ int			stuck_count = 0;
  *	it ran out of space.
  */
 
-boolean_t
+static boolean_t
 do_runq_scan(
 	run_queue_t	runq)
 {
@@ -1931,6 +1958,7 @@ void do_thread_scan(void)
 	spl_t		s;
 	boolean_t	restart_needed = 0;
 	thread_t	thread;
+	int		i;
 #if	MACH_HOST
 	processor_set_t	pset;
 #endif	/* MACH_HOST */
@@ -1939,15 +1967,19 @@ void do_thread_scan(void)
 #if	MACH_HOST
 	    simple_lock(&all_psets_lock);
 	    queue_iterate(&all_psets, pset, processor_set_t, all_psets) {
-		if (restart_needed = do_runq_scan(&pset->runq))
+		if ((restart_needed = do_runq_scan(&pset->runq)))
 			break;
 	    }
 	    simple_unlock(&all_psets_lock);
 #else	/* MACH_HOST */
 	    restart_needed = do_runq_scan(&default_pset.runq);
 #endif	/* MACH_HOST */
-	    if (!restart_needed)
-	    	restart_needed = do_runq_scan(&master_processor->runq);
+	    if (!restart_needed) {
+		for (i = 0; i < smp_get_numcpus(); i++) {
+		    if ((restart_needed = do_runq_scan(&cpu_to_processor(i)->runq)))
+			break;
+		}
+	    }
 
 	    /*
 	     *	Ok, we now have a collection of candidates -- fix them.

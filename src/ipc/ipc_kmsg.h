@@ -102,6 +102,46 @@ extern ipc_kmsg_t	ipc_kmsg_cache[NCPUS];
 
 #define ikm_cache()     ipc_kmsg_cache[cpu_number()]
 
+#define ikm_cache_alloc_try()						\
+MACRO_BEGIN								\
+	ipc_kmsg_t __kmsg = ikm_cache();				\
+	if (__kmsg != IKM_NULL) {					\
+		ikm_cache() = IKM_NULL;					\
+		ikm_check_initialized(__kmsg, IKM_SAVED_KMSG_SIZE);	\
+	}								\
+	__kmsg;								\
+MACRO_END
+
+#define ikm_cache_alloc()						\
+MACRO_BEGIN								\
+	ipc_kmsg_t __kmsg = ikm_cache_alloc_try(); 			\
+	if (!__kmsg) {							\
+		__kmsg = ikm_alloc(IKM_SAVED_MSG_SIZE);			\
+		if (__kmsg != IKM_NULL)					\
+			ikm_init(__kmsg, IKM_SAVED_MSG_SIZE);		\
+	}								\
+	__kmsg;								\
+MACRO_END
+
+#define ikm_cache_free_try(kmsg)					\
+MACRO_BEGIN								\
+	int __success = 0;						\
+	if (ikm_cache() == IKM_NULL) {					\
+		ikm_cache() = (kmsg);					\
+		__success = 1;						\
+	}								\
+	__success;							\
+MACRO_END
+
+#define ikm_cache_free(kmsg)						\
+MACRO_BEGIN								\
+	if (((kmsg)->ikm_size == IKM_SAVED_KMSG_SIZE) &&		\
+	    (ikm_cache() == IKM_NULL))					\
+		ikm_cache() = (kmsg);					\
+	else								\
+		ikm_free(kmsg);						\
+MACRO_END
+
 /*
  *	The size of the kernel message buffers that will be cached.
  *	IKM_SAVED_KMSG_SIZE includes overhead; IKM_SAVED_MSG_SIZE doesn't.
@@ -115,6 +155,16 @@ extern ipc_kmsg_t	ipc_kmsg_cache[NCPUS];
 
 #define	ikm_alloc(size)							\
 		((ipc_kmsg_t) kalloc(ikm_plus_overhead(size)))
+
+/*
+ *	The conversion between userland and kernel-land has to convert from port
+ *	names to ports.  This may increase the size that needs to be allocated
+ *	on the kernel size.  At worse the message is full of port names to be
+ *	converted.
+ */
+#define	IKM_EXPAND_FACTOR	((sizeof(mach_port_t) + sizeof(mach_port_name_t) - 1) / sizeof(mach_port_name_t))
+/* But make sure it's not the converse.  */
+_Static_assert(sizeof(mach_port_t) >= sizeof(mach_port_name_t));
 
 #define	ikm_init(kmsg, size)						\
 MACRO_BEGIN								\
@@ -242,38 +292,49 @@ extern void
 ipc_kmsg_free(ipc_kmsg_t);
 
 extern mach_msg_return_t
-ipc_kmsg_get(mach_msg_header_t *, mach_msg_size_t, ipc_kmsg_t *);
+ipc_kmsg_get(mach_msg_user_header_t *, mach_msg_size_t, ipc_kmsg_t *);
 
 extern mach_msg_return_t
 ipc_kmsg_get_from_kernel(mach_msg_header_t *, mach_msg_size_t, ipc_kmsg_t *);
 
 extern mach_msg_return_t
-ipc_kmsg_put(mach_msg_header_t *, ipc_kmsg_t, mach_msg_size_t);
+ipc_kmsg_put(mach_msg_user_header_t *, ipc_kmsg_t, mach_msg_size_t);
 
 extern void
 ipc_kmsg_put_to_kernel(mach_msg_header_t *, ipc_kmsg_t, mach_msg_size_t);
 
 extern mach_msg_return_t
-ipc_kmsg_copyin_header(mach_msg_header_t *, ipc_space_t, mach_port_t);
+ipc_kmsg_copyin_header(mach_msg_header_t *, ipc_space_t, mach_port_name_t);
 
 extern mach_msg_return_t
-ipc_kmsg_copyin(ipc_kmsg_t, ipc_space_t, vm_map_t, mach_port_t);
+ipc_kmsg_copyin(ipc_kmsg_t, ipc_space_t, vm_map_t, mach_port_name_t);
 
 extern void
 ipc_kmsg_copyin_from_kernel(ipc_kmsg_t);
 
 extern mach_msg_return_t
-ipc_kmsg_copyout_header(mach_msg_header_t *, ipc_space_t, mach_port_t);
+ipc_kmsg_copyout_header(mach_msg_header_t *, ipc_space_t, mach_port_name_t);
 
 extern mach_msg_return_t
 ipc_kmsg_copyout_object(ipc_space_t, ipc_object_t,
-			mach_msg_type_name_t, mach_port_t *);
+			mach_msg_type_name_t, mach_port_name_t *);
+
+static inline mach_msg_return_t
+ipc_kmsg_copyout_object_to_port(ipc_space_t space, ipc_object_t object,
+                                mach_msg_type_name_t msgt_name, mach_port_t *portp)
+{
+  mach_port_name_t name;;
+  mach_msg_return_t mr;
+  mr = ipc_kmsg_copyout_object(space, object, msgt_name, &name);
+  *portp = (mach_port_t)name;
+  return mr;
+}
 
 extern mach_msg_return_t
-ipc_kmsg_copyout_body(vm_offset_t, vm_offset_t, ipc_space_t, vm_map_t);
+ipc_kmsg_copyout_body(ipc_kmsg_t, ipc_space_t, vm_map_t);
 
 extern mach_msg_return_t
-ipc_kmsg_copyout(ipc_kmsg_t, ipc_space_t, vm_map_t, mach_port_t);
+ipc_kmsg_copyout(ipc_kmsg_t, ipc_space_t, vm_map_t, mach_port_name_t);
 
 extern mach_msg_return_t
 ipc_kmsg_copyout_pseudo(ipc_kmsg_t, ipc_space_t, vm_map_t);

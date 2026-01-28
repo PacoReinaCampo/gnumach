@@ -28,7 +28,7 @@
 #define NR_RESERVED_ENTRIES 8
 #define NR_GRANT_PAGES 8
 
-decl_simple_lock_data(static,lock);
+def_simple_lock_data(static,lock);
 static struct grant_entry *grants;
 static vm_map_entry_t grants_map_entry;
 static int last_grant = NR_RESERVED_ENTRIES;
@@ -135,7 +135,8 @@ void hyp_grant_init(void) {
 	
 	simple_lock_init(&lock);
 	vm_map_find_entry(kernel_map, &addr, NR_GRANT_PAGES * PAGE_SIZE,
-			  (vm_offset_t) 0, kernel_object, &grants_map_entry);
+			  (vm_offset_t) 0, kernel_object, &grants_map_entry,
+			  VM_PROT_DEFAULT, VM_PROT_ALL);
 	grants = (void*) addr;
 
 	for (i = 0; i < NR_GRANT_PAGES; i++)

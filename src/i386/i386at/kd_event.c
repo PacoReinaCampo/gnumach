@@ -62,10 +62,15 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <device/ds_routines.h>
 #include <device/device_types.h>
 #include <device/io_req.h>
-#include <i386/machspl.h>
+#include <i386/spl.h>
 #include <i386/pio.h>
 #include <i386at/kd.h>
 #include <i386at/kd_queue.h>
+#ifdef APIC
+# include <i386/apic.h>
+#else
+# include <i386/pic.h>
+#endif
 
 #include "kd_event.h"
 
@@ -90,7 +95,7 @@ static boolean_t initialized = FALSE;
  * kbdinit - set up event queue.
  */
 
-void
+static void
 kbdinit(void)
 {
 	spl_t s = SPLKD();
@@ -110,10 +115,7 @@ kbdinit(void)
 
 /*ARGSUSED*/
 int
-kbdopen(dev, flags, ior)
-	dev_t dev;
-	int flags;
-	io_req_t ior;
+kbdopen(dev_t dev, int flags, io_req_t ior)
 {
 	spl_t o_pri = spltty();
 	kdinit();
@@ -278,7 +280,9 @@ kd_enqsc(Scancode sc)
 	kd_event ev;
 
 	ev.type = KEYBD_EVENT;
-	ev.time = time;
+	/* Not used but we set it to avoid garbage */
+	ev.unused_time.seconds = 0;
+	ev.unused_time.microseconds = 0;
 	ev.value.sc = sc;
 	kbd_enqueue(&ev);
 }
@@ -307,9 +311,8 @@ kbd_enqueue(kd_event *ev)
 u_int X_kdb_enter_str[512], X_kdb_exit_str[512];
 int   X_kdb_enter_len = 0,  X_kdb_exit_len = 0;
 
-void
-kdb_in_out(p)
-const u_int *p;
+static void
+kdb_in_out(const u_int *p)
 {
 	int t = p[0];
 

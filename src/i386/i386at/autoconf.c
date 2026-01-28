@@ -26,8 +26,14 @@
 
 #include <kern/printf.h>
 #include <mach/std_types.h>
-#include <i386/pic.h>
+#include <i386at/autoconf.h>
+#include <i386/irq.h>
 #include <i386/ipl.h>
+#ifdef APIC
+# include <i386/apic.h>
+#else
+# include <i386/pic.h>
+#endif
 #include <chips/busses.h>
 
 /* initialization typecasts */
@@ -133,25 +139,11 @@ void take_dev_irq(
 		printf("The device below will clobber IRQ %d (%p).\n", pic, ivect[pic]);
 		printf("You have two devices at the same IRQ.\n");
 		printf("This won't work.  Reconfigure your hardware and try again.\n");
-		printf("%s%d: port = %lx, spl = %ld, pic = %d.\n",
+		printf("%s%d: port = %zx, spl = %zd, pic = %d.\n",
 		        dev->name, dev->unit, dev->address,
 			dev->sysdep, dev->sysdep1);
 		while (1);
 	}
 
-}
-
-void take_ctlr_irq(
-	const struct bus_ctlr *ctlr)
-{
-	int pic = ctlr->sysdep1;
-	if (ivect[pic] == intnull) {
-		iunit[pic] = ctlr->unit;
-		ivect[pic] = ctlr->intr;
-	} else {
-		printf("The device below will clobber IRQ %d (%p).\n", pic, ivect[pic]);
-		printf("You have two devices at the same IRQ.  This won't work.\n");
-		printf("Reconfigure your hardware and try again.\n");
-		while (1);
-	}
+	unmask_irq(pic);
 }
